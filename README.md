@@ -30,6 +30,6 @@ CI (`.github/workflows/build.yml`) runs an entry smoke test on CPython and build
 optionally with a daemon tag.
 
 ## Not yet
-- Handing the local token to other Omni apps signed with the same key (next PR).
+- Automatic token handoff to other Omni apps (needs one signing key across the apps). For now, **Connect apps** shows the token behind the screen lock to paste into each app.
 - Real-phone field test (the gate before any Omni-Hub merge).
 - Release signing / developer registration (limited-distribution account).
