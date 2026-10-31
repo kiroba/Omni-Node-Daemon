@@ -10,7 +10,8 @@ on:
         default: "main"
 
 env:
-  DAEMON_REF: ${{ github.event.inputs.daemon_ref || 'main' }}
+  # TEMP: Omni-Daemon PR #6 (v8.19.0 local token) isn't merged yet. Switch back to 'main' after it is.
+  DAEMON_REF: ${{ github.event.inputs.daemon_ref || 'feat/local-token' }}
 
 jobs:
   entry-smoke:
