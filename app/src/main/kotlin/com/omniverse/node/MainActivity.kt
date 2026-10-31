@@ -188,23 +188,39 @@ class MainActivity : Activity() {
             return
         }
         if (Build.VERSION.SDK_INT >= 30) {
-            BiometricPrompt.Builder(this)
-                .setTitle("Connect apps")
-                .setSubtitle("Unlock to see your node token")
-                .setAllowedAuthenticators(
-                    android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_WEAK or
-                        android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL
-                )
-                .build()
-                .authenticate(CancellationSignal(), mainExecutor, object : BiometricPrompt.AuthenticationCallback() {
-                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult?) {
-                        showToken(token)
-                    }
-                })
+            try {
+                BiometricPrompt.Builder(this)
+                    .setTitle("Connect apps")
+                    .setSubtitle("Unlock to see your node token")
+                    .setAllowedAuthenticators(
+                        android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                            android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                    )
+                    .build()
+                    .authenticate(CancellationSignal(), mainExecutor, object : BiometricPrompt.AuthenticationCallback() {
+                        override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult?) {
+                            showToken(token)
+                        }
+                        override fun onAuthenticationError(errorCode: Int, errString: CharSequence?) {
+                            // Cancelled or locked out: stay on the screen, never crash.
+                        }
+                    })
+            } catch (e: Exception) {
+                unlockWithScreenLock(km, token)
+            }
         } else {
+            unlockWithScreenLock(km, token)
+        }
+    }
+
+    /** Fallback: the phone's own PIN/pattern screen. If even that is unavailable, show after the warning above. */
+    private fun unlockWithScreenLock(km: KeyguardManager, token: String) {
+        try {
             @Suppress("DEPRECATION")
             val i = km.createConfirmDeviceCredentialIntent("Connect apps", "Unlock to see your node token")
             if (i == null) showToken(token) else startActivityForResult(i, REQ_UNLOCK)
+        } catch (e: Exception) {
+            showToken(token)
         }
     }
 
