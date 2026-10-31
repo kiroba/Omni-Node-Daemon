@@ -2,6 +2,7 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -10,8 +11,10 @@ on:
         default: "main"
 
 env:
-  # TEMP: Omni-Daemon PR #6 (v8.19.0 local token) isn't merged yet. Switch back to 'main' after it is.
-  DAEMON_REF: ${{ github.event.inputs.daemon_ref || 'feat/local-token' }}
+  DAEMON_REF: ${{ github.event.inputs.daemon_ref || 'main' }}
+
+permissions:
+  contents: write   # tag builds publish a pre-release with the APK
 
 jobs:
   entry-smoke:
@@ -73,3 +76,10 @@ jobs:
         with:
           name: omni-node-daemon-debug
           path: app/build/outputs/apk/debug/*.apk
+      - name: Publish pre-release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: app/build/outputs/apk/debug/app-debug.apk
+          body: "Pre-alpha test build of Omni Node (debug signing key, arm64 + x86_64). Packages Omni-Daemon main (v8.19.0, local token on)."
