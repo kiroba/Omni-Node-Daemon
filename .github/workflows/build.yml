@@ -1,0 +1,74 @@
+name: build
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      daemon_ref:
+        description: "kiroba/Omni-Daemon tag, branch or commit to package"
+        default: "main"
+
+env:
+  DAEMON_REF: ${{ github.event.inputs.daemon_ref || 'main' }}
+
+jobs:
+  entry-smoke:
+    # Runs omni_node_entry.start() on plain CPython the way the app does (HOME = files dir,
+    # OMNI_LOCAL_TOKEN=1) and checks the token gate from outside. No phone needed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install cryptography
+      - run: scripts/fetch_daemon.sh "$DAEMON_REF"
+      - name: Start the node like the app does
+        run: |
+          python - <<'PY'
+          import json, os, sys, tempfile, time, urllib.request, urllib.error
+          sys.path.insert(0, "app/src/main/python")
+          files = tempfile.mkdtemp(prefix="files_")
+          import omni_node_entry as e
+          assert e.start(files)
+          tok_path = os.path.join(files, ".omni", "local_token")
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          url = "http://127.0.0.1:9100/api/v1/telemetry/node-health"
+          for _ in range(100):
+              if os.path.exists(tok_path):
+                  try:
+                      req = urllib.request.Request(url, headers={"X-Omni-Local-Token": open(tok_path).read().strip()})
+                      body = json.loads(opener.open(req, timeout=2).read())
+                      break
+                  except Exception:
+                      pass
+              time.sleep(0.2)
+          else:
+              sys.exit("node did not come up with a local token: " + e.error())
+          print("node", body["node_id"][:8], "version", body["version"], "peers", body.get("active_peers"))
+          try:
+              opener.open(url, timeout=2)
+              sys.exit("FAIL: node-health answered without the local token")
+          except urllib.error.HTTPError as err:
+              assert err.code == 401, err.code
+          print("OK: token required on :9100; daemon ref", e.daemon_ref())
+          PY
+
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+      - uses: actions/setup-python@v5   # Chaquopy compiles .pyc with a matching host Python
+        with: { python-version: "3.11" }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: "8.10.2" }
+      - run: scripts/fetch_daemon.sh "$DAEMON_REF"
+      - run: gradle :app:assembleDebug --stacktrace
+      - name: APK size
+        run: ls -l app/build/outputs/apk/debug/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omni-node-daemon-debug
+          path: app/build/outputs/apk/debug/*.apk

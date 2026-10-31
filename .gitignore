@@ -1,0 +1,11 @@
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+# Fetched from kiroba/Omni-Daemon at build time (scripts/fetch_daemon.sh); never edited here.
+app/src/main/python/omni_live_daemon_server.py
+app/src/main/python/omni_signing.py
+app/src/main/python/omni_negentropy.py
+app/src/main/python/DAEMON_REF
