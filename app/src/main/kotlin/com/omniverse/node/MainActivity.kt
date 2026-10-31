@@ -3,12 +3,17 @@ package com.omniverse.node
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.KeyguardManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.hardware.biometrics.BiometricPrompt
+import android.os.CancellationSignal
+import android.os.PersistableBundle
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -17,16 +22,19 @@ import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
+import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import java.util.concurrent.Executors
 
-/** One screen, one switch, one status line. */
+/** One screen: one switch, a status card, and Connect apps (token behind the screen lock). */
 class MainActivity : Activity() {
     private lateinit var master: Switch
     private lateinit var statusLine: TextView
+    private lateinit var statusDot: TextView
+    private lateinit var statusDetail: TextView
     private lateinit var nodeLine: TextView
     private val ui = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
@@ -62,18 +70,57 @@ class MainActivity : Activity() {
             setOnCheckedChangeListener { _, on -> onSwitch(on) }
         }
         root.addView(master, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        // Status card: a colored dot + the plain status line + peers / daemon version.
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad * 2 / 3, pad, pad * 2 / 3)
+            background = GradientDrawable().apply {
+                cornerRadius = 16 * resources.displayMetrics.density
+                setColor(Color.parseColor("#1E1E1E"))
+                setStroke((1 * resources.displayMetrics.density).toInt(), Color.parseColor("#333333"))
+            }
+        }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        statusDot = TextView(this).apply { text = "\u25CF"; textSize = 22f; setPadding(0, 0, pad / 2, 0) }
         statusLine = TextView(this).apply {
             textSize = 18f
-            setTextColor(Color.parseColor("#03DAC6"))
-            setPadding(0, pad, 0, pad / 2)
+            setTextColor(Color.WHITE)
+            setTypeface(typeface, Typeface.BOLD)
         }
-        root.addView(statusLine)
+        row.addView(statusDot)
+        row.addView(statusLine)
+        card.addView(row)
+        statusDetail = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#B0B0B0"))
+            setPadding(0, pad / 4, 0, 0)
+        }
+        card.addView(statusDetail)
+        root.addView(card, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = pad
+            bottomMargin = pad / 2
+        })
         nodeLine = TextView(this).apply {
             textSize = 13f
             setTextColor(Color.parseColor("#808080"))
             setOnClickListener { copyNodeId() }
         }
         root.addView(nodeLine)
+        root.addView(Button(this).apply {
+            text = "Connect apps"
+            isAllCaps = false
+            textSize = 16f
+            setOnClickListener { unlockThenShowToken() }
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = pad
+        })
+        root.addView(TextView(this).apply {
+            text = "KickBack, Mesh Monitor and other Omni apps need this phone's node token. It's behind your screen lock."
+            textSize = 13f
+            setTextColor(Color.parseColor("#808080"))
+            gravity = Gravity.CENTER
+            setPadding(0, pad / 3, 0, 0)
+        })
         setContentView(root)
     }
 
@@ -104,9 +151,96 @@ class MainActivity : Activity() {
 
     private fun show(s: NodeStatus) {
         statusLine.text = s.line
+        val color = when {
+            s.line == NodeStatus.OFF -> "#808080"
+            s.line.startsWith("Problem") -> "#CF6679"
+            s.peers > 0 -> "#4CAF50"
+            s.line == NodeStatus.LOOKING -> "#03DAC6"
+            else -> "#FFB74D"   // starting
+        }
+        statusDot.setTextColor(Color.parseColor(color))
+        statusDetail.text = when {
+            s.line == NodeStatus.OFF -> "Turn on Network to connect"
+            s.version.isNotEmpty() -> "Running · ${s.peers} peer" + (if (s.peers == 1) "" else "s") + " · daemon v${s.version}"
+            s.line.startsWith("Problem") -> "Turn Network off and on. If it stays, send a report."
+            else -> "Starting the node..."
+        }
         if (s.nodeId.isNotEmpty()) nodeId = s.nodeId
-        nodeLine.text = if (nodeId.isEmpty()) "" else "Your node ${NodeStatus(s.line, nodeId).tag}  ·  tap to copy full key" +
-            (if (s.version.isNotEmpty()) "\nDaemon v${s.version}" else "")
+        nodeLine.text = if (nodeId.isEmpty()) "" else "Your node ${NodeStatus(s.line, nodeId).tag}  ·  tap to copy full key"
+    }
+
+    // ---- Connect apps: the local token, only after the phone's own lock (fingerprint, face, PIN) ----
+
+    private fun unlockThenShowToken() {
+        val token = NodeStatus.localToken(this)
+        if (token == null) {
+            Toast.makeText(this, "Turn on Network first; the token is made when the node starts.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val km = getSystemService(KeyguardManager::class.java)
+        if (!km.isDeviceSecure) {
+            AlertDialog.Builder(this)
+                .setTitle("No screen lock")
+                .setMessage("Set a screen lock (PIN, pattern or fingerprint) so only you can see this token. Show it anyway?")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Show") { _, _ -> showToken(token) }
+                .show()
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            BiometricPrompt.Builder(this)
+                .setTitle("Connect apps")
+                .setSubtitle("Unlock to see your node token")
+                .setAllowedAuthenticators(
+                    android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                        android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                )
+                .build()
+                .authenticate(CancellationSignal(), mainExecutor, object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult?) {
+                        showToken(token)
+                    }
+                })
+        } else {
+            @Suppress("DEPRECATION")
+            val i = km.createConfirmDeviceCredentialIntent("Connect apps", "Unlock to see your node token")
+            if (i == null) showToken(token) else startActivityForResult(i, REQ_UNLOCK)
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_UNLOCK && resultCode == RESULT_OK) NodeStatus.localToken(this)?.let { showToken(it) }
+    }
+
+    private fun showToken(token: String) {
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad / 2, pad, 0) }
+        body.addView(TextView(this).apply {
+            text = "In KickBack or Mesh Monitor open Hub settings, choose Remote hub, type 127.0.0.1 as the address and paste this token. Don't share it: any app with it can use your node."
+            textSize = 14f
+        })
+        body.addView(TextView(this).apply {
+            text = token
+            textSize = 13f
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            setPadding(0, pad, 0, 0)
+        })
+        AlertDialog.Builder(this)
+            .setTitle("Your node token")
+            .setView(body)
+            .setNegativeButton("Close", null)
+            .setPositiveButton("Copy token") { _, _ -> copyToken(token) }
+            .show()
+    }
+
+    private fun copyToken(token: String) {
+        val clip = ClipData.newPlainText("Omni node token", token)
+        // Keeps it out of the keyboard's clipboard preview on Android 13+.
+        clip.description.extras = PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
+        getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
+        Toast.makeText(this, "Token copied. Paste it in the app's Hub settings.", Toast.LENGTH_LONG).show()
     }
 
     private fun onSwitch(on: Boolean) {
@@ -166,6 +300,8 @@ class MainActivity : Activity() {
         getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Omni node key", nodeId))
         Toast.makeText(this, "Node key copied", Toast.LENGTH_SHORT).show()
     }
+
+    companion object { private const val REQ_UNLOCK = 7 }
 
     override fun onDestroy() {
         io.shutdownNow()

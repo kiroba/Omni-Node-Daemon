@@ -82,4 +82,4 @@ jobs:
         with:
           prerelease: true
           files: app/build/outputs/apk/debug/app-debug.apk
-          body: "Pre-alpha test build of Omni Node (debug signing key, arm64 + x86_64). Packages Omni-Daemon main (v8.19.0, local token on)."
+          body: "Pre-alpha test build of Omni Node (debug signing key, arm64 + x86_64). Packages Omni-Daemon main (v8.20.0+, local token on). Connect apps shows the node token behind your screen lock; paste it into KickBack / Mesh Monitor Hub settings (Remote hub, 127.0.0.1). New debug key per build: uninstall the old Omni Node first."
