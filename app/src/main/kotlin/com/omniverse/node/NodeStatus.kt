@@ -7,7 +7,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /** One plain status line, the same words everywhere (Directive v7). */
-data class NodeStatus(val line: String, val nodeId: String = "", val version: String = "", val peers: Int = 0) {
+data class NodeStatus(val line: String, val nodeId: String = "", val version: String = "", val peers: Int = 0,
+                      val wan: JSONObject? = null) {
     /** Name + short key tag, e.g. "kiro·4f23". No username in this app yet, so the tag alone. */
     val tag: String get() = if (nodeId.length >= 4) "·" + nodeId.take(4) else ""
 
@@ -40,7 +41,8 @@ data class NodeStatus(val line: String, val nodeId: String = "", val version: St
                     line = if (peers > 0) connected(peers) else LOOKING,
                     nodeId = j.optString("node_id"),
                     version = j.optString("version"),
-                    peers = peers
+                    peers = peers,
+                    wan = j.optJSONObject("wan")
                 )
             } catch (_: java.net.ConnectException) {
                 NodeStatus(STARTING)

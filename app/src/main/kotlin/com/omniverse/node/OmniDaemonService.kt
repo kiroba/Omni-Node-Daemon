@@ -27,16 +27,29 @@ class OmniDaemonService : Service() {
     private var handler: Handler? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var lastLine = ""
+    private var radio: NodeRadio? = null
 
     companion object {
         private const val CHANNEL = "omni_node_status"
         private const val NOTE_ID = 1
         private const val ACTION_STOP = "com.omniverse.node.STOP"
+        private const val ACTION_PEERS = "com.omniverse.node.PEERS"
+        private const val ACTION_RADIOS = "com.omniverse.node.RADIOS"
         private const val POLL_MS = 15_000L
 
         fun start(c: Context) {
             val i = Intent(c, OmniDaemonService::class.java)
             if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(i) else c.startService(i)
+        }
+
+        /** The Add peer list changed: hand it to the daemon now. No-op when the node is off. */
+        fun peersChanged(c: Context) {
+            if (NodePrefs.isOn(c)) c.startService(Intent(c, OmniDaemonService::class.java).setAction(ACTION_PEERS))
+        }
+
+        /** Radio permissions were just granted: restart the radios with them. */
+        fun radiosChanged(c: Context) {
+            if (NodePrefs.isOn(c)) c.startService(Intent(c, OmniDaemonService::class.java).setAction(ACTION_RADIOS))
         }
 
         fun stop(c: Context) {
@@ -52,6 +65,15 @@ class OmniDaemonService : Service() {
             stopForegroundCompat()
             stopSelf()
             return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_PEERS && worker != null) {
+            radio?.peersChanged()
+            return START_STICKY
+        }
+        if (intent?.action == ACTION_RADIOS && worker != null) {
+            radio?.stop()
+            radio = null      // the next poll starts them again with the new permissions
+            return START_STICKY
         }
         goForeground(NodeStatus.STARTING)
         if (worker == null) startNode()
@@ -81,7 +103,18 @@ class OmniDaemonService : Service() {
             } catch (_: Throwable) {
                 ""
             }
-            update(if (err.isNotEmpty()) NodeStatus.problem(err.take(80)) else NodeStatus.fetch(this@OmniDaemonService).line)
+            if (err.isNotEmpty()) {
+                update(NodeStatus.problem(err.take(80)))
+            } else {
+                val s = NodeStatus.fetch(this@OmniDaemonService)
+                update(s.line)
+                // Radios start once the daemon answers with its key (the BLE / Wi-Fi Aware id).
+                if (radio == null && s.nodeId.isNotEmpty()) {
+                    val r = NodeRadio(this@OmniDaemonService)
+                    radio = r
+                    android.os.Handler(mainLooper).post { r.start(s.nodeId) }
+                }
+            }
             handler?.postDelayed(this, POLL_MS)
         }
     }
@@ -145,6 +178,7 @@ class OmniDaemonService : Service() {
 
     override fun onDestroy() {
         handler?.removeCallbacksAndMessages(null)
+        try { radio?.stop() } catch (_: Throwable) {}
         try {
             multicastLock?.release()
         } catch (_: Throwable) {
