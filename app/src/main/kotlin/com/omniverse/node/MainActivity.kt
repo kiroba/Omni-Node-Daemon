@@ -23,6 +23,10 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
 import android.widget.Button
+import android.widget.EditText
+import android.widget.ScrollView
+import android.text.InputType
+import org.json.JSONObject
 import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
@@ -36,6 +40,9 @@ class MainActivity : Activity() {
     private lateinit var statusDot: TextView
     private lateinit var statusDetail: TextView
     private lateinit var nodeLine: TextView
+    private lateinit var radioLine: TextView
+    private lateinit var wanLine: TextView
+    private lateinit var peerBox: LinearLayout
     private val ui = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
     private var nodeId = ""
@@ -121,7 +128,177 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             setPadding(0, pad / 3, 0, 0)
         })
-        setContentView(root)
+        // ---- Radios + internet ----
+        root.addView(section("Nearby radios", pad))
+        radioLine = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#B0B0B0"))
+            setOnClickListener { askRadioPermissions() }
+        }
+        root.addView(radioLine, fullWidth())
+        root.addView(section("Internet", pad))
+        wanLine = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#B0B0B0"))
+            setOnLongClickListener { copyWan(); true }
+        }
+        root.addView(wanLine, fullWidth())
+        // ---- Add peer: addresses this node always syncs with (a friend's node, your PC, a server) ----
+        root.addView(section("Peers", pad))
+        root.addView(TextView(this).apply {
+            text = "Add a friend's address (from their Internet line), your PC or a server. Your node keeps syncing with it over the internet. Tap one to remove it."
+            textSize = 13f
+            setTextColor(Color.parseColor("#808080"))
+        }, fullWidth())
+        peerBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(peerBox, fullWidth())
+        root.addView(Button(this).apply {
+            text = "Add peer"
+            isAllCaps = false
+            textSize = 16f
+            setOnClickListener { addPeerDialog() }
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = pad / 3
+        })
+        root.gravity = Gravity.CENTER_HORIZONTAL
+        root.setPadding(pad, pad * 2, pad, pad * 2)
+        setContentView(ScrollView(this).apply {
+            setBackgroundColor(Color.parseColor("#121212"))
+            isFillViewport = true
+            addView(root)
+        })
+        showPeers()
+    }
+
+    private fun fullWidth() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+    private fun section(title: String, pad: Int) = TextView(this).apply {
+        text = title
+        textSize = 17f
+        setTypeface(typeface, Typeface.BOLD)
+        setTextColor(Color.WHITE)
+        setPadding(0, pad, 0, pad / 4)
+        layoutParams = fullWidth()
+    }
+
+    // ---- Add peer ----
+
+    private fun showPeers() {
+        peerBox.removeAllViews()
+        val states = radioStatus()?.optJSONArray("peers")
+        for (peer in PeerList.read(this)) {
+            var state = ""
+            for (i in 0 until (states?.length() ?: 0)) {
+                val o = states!!.getJSONObject(i)
+                if (o.optString("peer") == "${peer.host}:${peer.port}") state = o.optString("state")
+            }
+            val label = when {
+                state == "ok" -> "\u25CF  $peer  ·  syncing"
+                state.isEmpty() -> "\u25CB  $peer  ·  waiting for the node"
+                else -> "\u25CB  $peer  ·  $state"
+            }
+            peerBox.addView(TextView(this).apply {
+                text = label
+                textSize = 15f
+                setTextColor(Color.parseColor(if (state == "ok") "#4CAF50" else "#FFB74D"))
+                setPadding(0, 12, 0, 12)
+                setOnClickListener { removePeer(peer) }
+            })
+        }
+    }
+
+    private fun addPeerDialog() {
+        val input = EditText(this).apply {
+            hint = "203.0.113.7 or [2001:db8::1]:5005 or mypc.example.com"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            isSingleLine = true
+        }
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val box = LinearLayout(this).apply { setPadding(pad, pad / 2, pad, 0); addView(input, fullWidth()) }
+        AlertDialog.Builder(this)
+            .setTitle("Add peer")
+            .setMessage("Address of another node. Port 5005 unless you add one.")
+            .setView(box)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Add") { _, _ ->
+                val peer = PeerList.parse(input.text.toString())
+                if (peer == null) {
+                    Toast.makeText(this, "That address doesn't look right.", Toast.LENGTH_LONG).show()
+                } else {
+                    PeerList.write(this, PeerList.read(this) + peer)
+                    OmniDaemonService.peersChanged(this)
+                    showPeers()
+                    Toast.makeText(this, "Added. Your node will sync with $peer.", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .show()
+    }
+
+    private fun removePeer(peer: PeerList.Peer) {
+        AlertDialog.Builder(this)
+            .setTitle("Remove $peer?")
+            .setMessage("Your node stops syncing with it within two minutes.")
+            .setNegativeButton("Keep", null)
+            .setPositiveButton("Remove") { _, _ ->
+                PeerList.write(this, PeerList.read(this).filter { it != peer })
+                showPeers()
+            }
+            .show()
+    }
+
+    // ---- Radios ----
+
+    private fun radioStatus(): JSONObject? = try {
+        JSONObject(NodeRadio.statusFile(this).readText())
+    } catch (_: Exception) { null }
+
+    private fun missingRadioPermissions() = NodeRadio.permissions().filter {
+        checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun showRadios() {
+        if (!NodePrefs.isOn(this)) { radioLine.text = "Off"; return }
+        val missing = missingRadioPermissions()
+        if (missing.isNotEmpty()) {
+            radioLine.text = "Bluetooth and Wi-Fi Aware need the Nearby devices permission. Tap to allow."
+            radioLine.setTextColor(Color.parseColor("#FFB74D"))
+            return
+        }
+        radioLine.setTextColor(Color.parseColor("#B0B0B0"))
+        val r = radioStatus()
+        if (r == null) { radioLine.text = "Starting..."; return }
+        val n = r.optInt("ble_nearby")
+        radioLine.text = "Bluetooth: ${r.optString("ble")}" + (if (n > 0) " · $n nearby" else "") +
+            "\nWi-Fi Aware: ${r.optString("wifi_aware")}"
+    }
+
+    private fun askRadioPermissions() {
+        val missing = missingRadioPermissions()
+        if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), REQ_RADIOS)
+    }
+
+    // ---- Internet (from the daemon's node-health "wan" block, daemon v8.21.0+) ----
+
+    private var wanAddr = ""
+
+    private fun showWan(s: NodeStatus) {
+        if (!NodePrefs.isOn(this)) { wanLine.text = "Off"; wanAddr = ""; return }
+        val w = s.wan
+        if (w == null) { wanLine.text = "Checking..."; return }
+        val pub = w.optString("public_addr")
+        val reachable = w.optBoolean("reachable")
+        wanAddr = pub
+        wanLine.text = when {
+            reachable && pub.isNotEmpty() -> "Reachable at $pub\nLong-press to copy, then a friend adds it under Add peer."
+            pub.isNotEmpty() -> "Your address is $pub, but the router blocks incoming connections (${w.optString("nat", "NAT")}).\nYou can still add a friend or server that is reachable."
+            else -> w.optString("detail", "No internet path found yet.")
+        }
+    }
+
+    private fun copyWan() {
+        if (wanAddr.isEmpty()) return
+        getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Omni node address", wanAddr))
+        Toast.makeText(this, "Address copied", Toast.LENGTH_SHORT).show()
     }
 
     override fun onResume() {
@@ -139,10 +316,11 @@ class MainActivity : Activity() {
         override fun run() {
             if (!NodePrefs.isOn(this@MainActivity)) {
                 show(NodeStatus(NodeStatus.OFF))
+                showWan(NodeStatus(NodeStatus.OFF)); showRadios()
             } else {
                 io.execute {
                     val s = NodeStatus.fetch(this@MainActivity)
-                    ui.post { show(s) }
+                    ui.post { show(s); showWan(s); showRadios(); showPeers() }
                 }
             }
             ui.postDelayed(this, 3_000L)
@@ -273,11 +451,13 @@ class MainActivity : Activity() {
     private var afterNotifications: (() -> Unit)? = null
 
     private fun askNotificationsThen(next: () -> Unit) {
+        val ask = ArrayList(missingRadioPermissions())
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
+        ) ask += Manifest.permission.POST_NOTIFICATIONS
+        if (ask.isNotEmpty()) {
             afterNotifications = next
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+            requestPermissions(ask.toTypedArray(), 1)
         } else {
             next()
         }
@@ -286,6 +466,7 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         // The node runs either way; without the permission the status just isn't in the shade.
+        if (requestCode == REQ_RADIOS) { OmniDaemonService.radiosChanged(this); return }
         afterNotifications?.invoke()
         afterNotifications = null
     }
@@ -317,7 +498,7 @@ class MainActivity : Activity() {
         Toast.makeText(this, "Node key copied", Toast.LENGTH_SHORT).show()
     }
 
-    companion object { private const val REQ_UNLOCK = 7 }
+    companion object { private const val REQ_UNLOCK = 7; private const val REQ_RADIOS = 8 }
 
     override fun onDestroy() {
         io.shutdownNow()
