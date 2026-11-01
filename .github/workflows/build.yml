@@ -59,6 +59,7 @@ jobs:
           PY
 
   apk:
+    needs: entry-smoke   # never build or publish an APK whose daemon fails to start
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
