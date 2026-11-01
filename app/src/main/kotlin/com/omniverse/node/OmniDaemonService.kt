@@ -99,7 +99,7 @@ class OmniDaemonService : Service() {
             try {
                 acquireMulticastLock()
                 if (!Python.isStarted()) Python.start(AndroidPlatform(this))
-                Python.getInstance().getModule("omni_node_entry").callAttr("start", filesDir.absolutePath)
+                Python.getInstance().getModule("omni_node_entry").callAttr("start", filesDir.absolutePath, android.os.Build.MODEL ?: "Android phone")
             } catch (t: Throwable) {
                 update(NodeStatus.problem("the node couldn't start (${t.javaClass.simpleName})"))
             }

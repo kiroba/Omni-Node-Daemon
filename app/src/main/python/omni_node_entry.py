@@ -22,8 +22,9 @@ def _run():
         print(f"[omni-node] daemon stopped: {_error}", file=sys.stderr, flush=True)
 
 
-def start(files_dir: str) -> bool:
-    """files_dir = Context.getFilesDir(): app-private, survives updates, removed on uninstall."""
+def start(files_dir: str, node_name: str = None) -> bool:
+    """files_dir = Context.getFilesDir(): app-private, survives updates, removed on uninstall.
+    node_name (e.g. Build.MODEL) is what a paired device shows for this phone (daemon v8.24.0+)."""
     global _started
     if _started:
         return False
@@ -32,6 +33,8 @@ def start(files_dir: str) -> bool:
     os.environ["OMNI_LOCAL_TOKEN"] = "1"            # other apps on the phone must not reach :5000
     os.environ["OMNI_RELAY"] = "off"                # phone relay only via Relay calls (Wi-Fi + charging)
     os.environ["PYTHONUTF8"] = "1"
+    if node_name:
+        os.environ.setdefault("OMNI_NODE_NAME", str(node_name)[:40])   # Pair a device shows this name
     os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost,::1")
     os.chdir(files_dir)                              # continuity_events.db lives here
     threading.Thread(target=_run, name="omni-daemon", daemon=True).start()

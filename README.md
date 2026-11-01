@@ -25,6 +25,13 @@ the daemon is ever merged into Omni-Hub.)
   shows why it's waiting, active calls, MB used today, and whether the router opened the ports.
   Desktops running Omni-Daemon relay by default, so phones are only a backup.
 
+- **Pair a device (0.4.0, needs daemon v8.24.0):** Show a code (6 digits, 5 minutes, 5 tries, plus
+  the pairing text to paste), Enter a code (or `123456 192.168.1.20` if the other device isn't found),
+  the paired devices (tap one to remove it) and a Quiet mode line. Once paired, the node's beacons
+  carry only a rotating token and `:5005` stays silent for anyone who isn't paired. Unpaired phones
+  behave as before. The daemon side is documented in Omni-Daemon `Admin/docs/QUIET_MESH.md`. No QR
+  drawing on the phone yet (no QR library in the app); the desktop draws one when `qrcode` is installed.
+
 ## One copy of the daemon
 The Python daemon is developed and tested only in kiroba/Omni-Daemon. This repo packages it:
 `scripts/fetch_daemon.sh <ref>` copies `omni_live_daemon_server.py` plus every `omni_*` module it
@@ -41,5 +48,6 @@ optionally with a daemon tag.
 - Field tests of Relay calls: charging/Wi-Fi gating, router port mapping, and calls between
   different networks.
 - Automatic token handoff to other Omni apps (needs one signing key across the apps). For now, **Connect apps** shows the token behind the screen lock to paste into each app.
-- Real-phone field test (the gate before any Omni-Hub merge).
+- Real-phone field test (the gate before any Omni-Hub merge), including pairing two phones on one Wi-Fi.
+- Scanning a pairing QR code with the camera (paste the pairing text for now).
 - Release signing / developer registration (limited-distribution account).
