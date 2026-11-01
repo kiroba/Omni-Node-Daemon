@@ -30,6 +30,7 @@ def start(files_dir: str) -> bool:
     os.makedirs(files_dir, exist_ok=True)
     os.environ["HOME"] = files_dir                  # ~/.omniverse (node key), ~/.omni (tokens)
     os.environ["OMNI_LOCAL_TOKEN"] = "1"            # other apps on the phone must not reach :5000
+    os.environ["OMNI_RELAY"] = "off"                # phone relay only via Relay calls (Wi-Fi + charging)
     os.environ["PYTHONUTF8"] = "1"
     os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost,::1")
     os.chdir(files_dir)                              # continuity_events.db lives here

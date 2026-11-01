@@ -28,6 +28,7 @@ class OmniDaemonService : Service() {
     private var multicastLock: WifiManager.MulticastLock? = null
     private var lastLine = ""
     private var radio: NodeRadio? = null
+    private var relay: NodeRelay? = null
 
     companion object {
         private const val CHANNEL = "omni_node_status"
@@ -35,6 +36,7 @@ class OmniDaemonService : Service() {
         private const val ACTION_STOP = "com.omniverse.node.STOP"
         private const val ACTION_PEERS = "com.omniverse.node.PEERS"
         private const val ACTION_RADIOS = "com.omniverse.node.RADIOS"
+        private const val ACTION_RELAY = "com.omniverse.node.RELAY"
         private const val POLL_MS = 15_000L
 
         fun start(c: Context) {
@@ -50,6 +52,11 @@ class OmniDaemonService : Service() {
         /** Radio permissions were just granted: restart the radios with them. */
         fun radiosChanged(c: Context) {
             if (NodePrefs.isOn(c)) c.startService(Intent(c, OmniDaemonService::class.java).setAction(ACTION_RADIOS))
+        }
+
+        /** Relay calls setting changed: apply it now. No-op when the node is off. */
+        fun relayChanged(c: Context) {
+            if (NodePrefs.isOn(c)) c.startService(Intent(c, OmniDaemonService::class.java).setAction(ACTION_RELAY))
         }
 
         fun stop(c: Context) {
@@ -68,6 +75,10 @@ class OmniDaemonService : Service() {
         }
         if (intent?.action == ACTION_PEERS && worker != null) {
             radio?.peersChanged()
+            return START_STICKY
+        }
+        if (intent?.action == ACTION_RELAY && worker != null) {
+            relay?.evaluate()
             return START_STICKY
         }
         if (intent?.action == ACTION_RADIOS && worker != null) {
@@ -113,6 +124,12 @@ class OmniDaemonService : Service() {
                     val r = NodeRadio(this@OmniDaemonService)
                     radio = r
                     android.os.Handler(mainLooper).post { r.start(s.nodeId) }
+                }
+                // Phone relay (off unless "Relay calls" is on; Wi-Fi + charging only).
+                if (relay == null && s.nodeId.isNotEmpty()) {
+                    val rl = NodeRelay(this@OmniDaemonService)
+                    relay = rl
+                    android.os.Handler(mainLooper).post { rl.start() }
                 }
             }
             handler?.postDelayed(this, POLL_MS)
@@ -179,6 +196,7 @@ class OmniDaemonService : Service() {
     override fun onDestroy() {
         handler?.removeCallbacksAndMessages(null)
         try { radio?.stop() } catch (_: Throwable) {}
+        try { relay?.stop() } catch (_: Throwable) {}
         try {
             multicastLock?.release()
         } catch (_: Throwable) {

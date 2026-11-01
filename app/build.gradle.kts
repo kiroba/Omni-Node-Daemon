@@ -12,8 +12,8 @@ android {
         applicationId = "com.omniverse.node"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.2.0"
+        versionCode = 5
+        versionName = "0.3.0"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 

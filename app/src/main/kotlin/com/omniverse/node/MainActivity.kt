@@ -42,6 +42,8 @@ class MainActivity : Activity() {
     private lateinit var nodeLine: TextView
     private lateinit var radioLine: TextView
     private lateinit var wanLine: TextView
+    private lateinit var relaySwitch: Switch
+    private lateinit var relayLine: TextView
     private lateinit var peerBox: LinearLayout
     private val ui = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
@@ -143,6 +145,29 @@ class MainActivity : Activity() {
             setOnLongClickListener { copyWan(); true }
         }
         root.addView(wanLine, fullWidth())
+        // ---- Relay calls (daemon v8.22.0): opt-in, Wi-Fi + charging only ----
+        root.addView(section("Relay calls", pad))
+        relaySwitch = Switch(this).apply {
+            text = "Help calls connect"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            isChecked = NodeRelay.read(this@MainActivity).on
+            setOnCheckedChangeListener { _, on -> setRelay(on) }
+        }
+        root.addView(relaySwitch, fullWidth())
+        root.addView(TextView(this).apply {
+            text = "When two people on your mesh are both on mobile data, their call can pass through this phone. " +
+                "It only relays while the phone is charging on Wi-Fi, never on mobile data. Tap the line below to change the daily limit."
+            textSize = 13f
+            setTextColor(Color.parseColor("#808080"))
+        }, fullWidth())
+        relayLine = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#B0B0B0"))
+            setPadding(0, pad / 4, 0, 0)
+            setOnClickListener { relayCapDialog() }
+        }
+        root.addView(relayLine, fullWidth())
         // ---- Add peer: addresses this node always syncs with (a friend's node, your PC, a server) ----
         root.addView(section("Peers", pad))
         root.addView(TextView(this).apply {
@@ -246,6 +271,57 @@ class MainActivity : Activity() {
             .show()
     }
 
+    // ---- Relay calls ----
+
+    private fun setRelay(on: Boolean) {
+        val s = NodeRelay.read(this)
+        if (s.on == on) return
+        NodeRelay.write(this, s.copy(on = on))
+        OmniDaemonService.relayChanged(this)
+        relayLine.text = if (on) "Checking Wi-Fi and charging..." else "Off"
+    }
+
+    private fun relayCapDialog() {
+        val s = NodeRelay.read(this)
+        val labels = NodeRelay.CAPS_MB.map { "Up to ${NodeRelay.capLabel(it)} a day" }.toTypedArray()
+        val current = NodeRelay.CAPS_MB.indexOf(s.mbDay).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Daily relay limit")
+            .setSingleChoiceItems(labels, current) { d, which ->
+                NodeRelay.write(this, s.copy(mbDay = NodeRelay.CAPS_MB[which]))
+                OmniDaemonService.relayChanged(this)
+                d.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showRelay(s: NodeStatus) {
+        val set = NodeRelay.read(this)
+        if (relaySwitch.isChecked != set.on) relaySwitch.isChecked = set.on
+        val cap = NodeRelay.capLabel(set.mbDay)
+        if (!NodePrefs.isOn(this)) { relayLine.text = "Off (turn on Network first)"; return }
+        if (!set.on) { relayLine.text = "Off · limit $cap a day"; relayLine.setTextColor(Color.parseColor("#808080")); return }
+        val st = NodeRelay.status(this)
+        val r = s.relay
+        val daemonMsg = st?.optString("daemon").orEmpty()
+        relayLine.setTextColor(Color.parseColor("#B0B0B0"))
+        relayLine.text = when {
+            st == null -> "Checking Wi-Fi and charging..."
+            !st.optBoolean("active") -> "Waiting: ${st.optString("reason").removePrefix("waiting ")} · limit $cap a day"
+            daemonMsg.isNotEmpty() && daemonMsg != "ok" -> "Problem: $daemonMsg".also { relayLine.setTextColor(Color.parseColor("#FFB74D")) }
+            r != null && r.optBoolean("enabled") -> {
+                relayLine.setTextColor(Color.parseColor("#4CAF50"))
+                val calls = r.optInt("allocations")
+                val used = r.optDouble("mb_today", 0.0)
+                val pub = r.optString("public").takeIf { it.isNotEmpty() && it != "null" }
+                "Relaying · $calls active · ${"%.0f".format(used)} of $cap today" +
+                    (if (pub == null) "\nOnly reachable on this Wi-Fi so far (router didn't open the ports)." else "")
+            }
+            else -> "Starting the relay..."
+        }
+    }
+
     // ---- Radios ----
 
     private fun radioStatus(): JSONObject? = try {
@@ -316,11 +392,11 @@ class MainActivity : Activity() {
         override fun run() {
             if (!NodePrefs.isOn(this@MainActivity)) {
                 show(NodeStatus(NodeStatus.OFF))
-                showWan(NodeStatus(NodeStatus.OFF)); showRadios()
+                showWan(NodeStatus(NodeStatus.OFF)); showRadios(); showRelay(NodeStatus(NodeStatus.OFF))
             } else {
                 io.execute {
                     val s = NodeStatus.fetch(this@MainActivity)
-                    ui.post { show(s); showWan(s); showRadios(); showPeers() }
+                    ui.post { show(s); showWan(s); showRadios(); showPeers(); showRelay(s) }
                 }
             }
             ui.postDelayed(this, 3_000L)
