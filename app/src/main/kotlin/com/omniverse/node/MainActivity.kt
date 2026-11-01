@@ -364,10 +364,10 @@ class MainActivity : Activity() {
 
     private fun showPairing() {
         val on = NodePrefs.isOn(this)
-        val (text, color) = if (on) NodePairing.quietLine(pairing?.optJSONObject("quiet"))
+        val (qText, qColor) = if (on) NodePairing.quietLine(pairing?.optJSONObject("quiet"))
             else "Quiet mode: off (turn on Network first)" to "#808080"
-        quietLine.text = text
-        quietLine.setTextColor(Color.parseColor(color))
+        quietLine.text = qText
+        quietLine.setTextColor(Color.parseColor(qColor))
         val o = if (on) offer else null
         if (o != null) {
             offerCode.text = NodePairing.codeDisplay(o.optString("code"))
