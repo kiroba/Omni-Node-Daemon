@@ -5,7 +5,8 @@ local.properties
 *.iml
 .idea/
 # Fetched from kiroba/Omni-Daemon at build time (scripts/fetch_daemon.sh); never edited here.
-app/src/main/python/omni_live_daemon_server.py
-app/src/main/python/omni_signing.py
-app/src/main/python/omni_negentropy.py
+# Every daemon module is fetched; omni_node_entry.py is the only Python kept in this repo.
+app/src/main/python/omni_*.py
+!app/src/main/python/omni_node_entry.py
 app/src/main/python/DAEMON_REF
+app/src/main/python/DAEMON_FILES

@@ -8,9 +8,17 @@ DEST="$(cd "$(dirname "$0")/.." && pwd)/app/src/main/python"
 TMP="$(mktemp -d)"
 git clone --quiet https://github.com/kiroba/Omni-Daemon.git "$TMP/daemon"
 git -C "$TMP/daemon" checkout --quiet "$REF"
-for f in omni_live_daemon_server.py omni_signing.py omni_negentropy.py; do
-  cp "$TMP/daemon/Admin/$f" "$DEST/$f"
+# Copy the server plus every omni_* module it imports, so a new daemon module (omni_wan in
+# v8.21.0, omni_relay in v8.22.0) can never be left out of the APK again.
+SRC="$TMP/daemon/Admin"
+MODS="$(grep -ohE '^(import|from) omni_[a-z0-9_]+' "$SRC/omni_live_daemon_server.py" | awk '{print $2}' | sort -u)"
+cp "$SRC/omni_live_daemon_server.py" "$DEST/omni_live_daemon_server.py"
+echo omni_live_daemon_server.py > "$DEST/DAEMON_FILES"
+for m in $MODS; do
+  cp "$SRC/$m.py" "$DEST/$m.py"
+  echo "$m.py" >> "$DEST/DAEMON_FILES"
 done
+echo "packaged: $(tr '\n' ' ' < "$DEST/DAEMON_FILES")"
 echo "$REF $(git -C "$TMP/daemon" rev-parse --short HEAD)" > "$DEST/DAEMON_REF"
 grep -m1 '^VERSION = ' "$DEST/omni_live_daemon_server.py"
 rm -rf "$TMP"
