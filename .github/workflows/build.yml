@@ -56,6 +56,22 @@ jobs:
           except urllib.error.HTTPError as err:
               assert err.code == 401, err.code
           print("OK: token required on :9100; daemon ref", e.daemon_ref())
+          # Pair a device (daemon v8.24.0+): the pairing API answers on loopback with the token, and an
+          # unpaired node starts with quiet mode off (testers keep the old behaviour until they pair).
+          tok = open(tok_path).read().strip()
+          try:
+              req = urllib.request.Request("http://127.0.0.1:5000/api/pair/list", headers={"X-Omni-Local-Token": tok})
+              pl = json.loads(opener.open(req, timeout=5).read())
+              assert pl["quiet"]["mode"] == "auto" and pl["quiet"]["active"] is False and pl["peers"] == [], pl
+              req = urllib.request.Request("http://127.0.0.1:5000/api/pair/offer", data=b"{}", method="POST",
+                                           headers={"X-Omni-Local-Token": tok, "Content-Type": "application/json"})
+              off = json.loads(opener.open(req, timeout=10).read())
+              assert off["active"] and len(off["code"]) == 6 and off["payload"].startswith("omni://pair?p="), off
+              print("OK: pairing API (quiet mesh) works on Python", sys.version.split()[0])
+          except urllib.error.HTTPError as err:
+              if err.code != 404:
+                  raise
+              print("daemon has no pairing API yet (< v8.24.0): Pair a device will say the node needs an update")
           PY
 
   apk:

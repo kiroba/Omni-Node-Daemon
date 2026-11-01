@@ -45,6 +45,14 @@ class MainActivity : Activity() {
     private lateinit var relaySwitch: Switch
     private lateinit var relayLine: TextView
     private lateinit var peerBox: LinearLayout
+    private lateinit var quietLine: TextView
+    private lateinit var offerCard: LinearLayout
+    private lateinit var offerCode: TextView
+    private lateinit var offerExpiry: TextView
+    private lateinit var offerText: TextView
+    private lateinit var pairedBox: LinearLayout
+    private var offer: JSONObject? = null        // the open pairing offer while this phone shows a code
+    private var pairing: JSONObject? = null      // GET /api/pair/list
     private val ui = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
     private var nodeId = ""
@@ -185,6 +193,86 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             topMargin = pad / 3
         })
+        // ---- Pair a device (daemon v8.24.0): code, enter a code, paired list, quiet mode ----
+        root.addView(section(NodePairing.TITLE, pad))
+        root.addView(TextView(this).apply {
+            text = NodePairing.HINT
+            textSize = 13f
+            setTextColor(Color.parseColor("#808080"))
+        }, fullWidth())
+        quietLine = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#808080"))
+            setPadding(0, pad / 4, 0, 0)
+        }
+        root.addView(quietLine, fullWidth())
+        val pairButtons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        pairButtons.addView(Button(this).apply {
+            text = NodePairing.SHOW
+            isAllCaps = false
+            textSize = 15f
+            setOnClickListener { showPairCode() }
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        pairButtons.addView(Button(this).apply {
+            text = NodePairing.ENTER
+            isAllCaps = false
+            textSize = 15f
+            setOnClickListener { enterPairCodeDialog() }
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(pairButtons, fullWidth().apply { topMargin = pad / 3 })
+        offerCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = android.view.View.GONE
+            setPadding(pad, pad * 2 / 3, pad, pad * 2 / 3)
+            background = GradientDrawable().apply {
+                cornerRadius = 16 * resources.displayMetrics.density
+                setColor(Color.parseColor("#1E1E1E"))
+                setStroke((1 * resources.displayMetrics.density).toInt(), Color.parseColor("#333333"))
+            }
+        }
+        offerCode = TextView(this).apply {
+            textSize = 34f
+            typeface = Typeface.MONOSPACE
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+        }
+        offerExpiry = TextView(this).apply { textSize = 13f; setTextColor(Color.parseColor("#B0B0B0")) }
+        offerText = TextView(this).apply {
+            textSize = 11f
+            typeface = Typeface.MONOSPACE
+            setTextColor(Color.parseColor("#808080"))
+            setTextIsSelectable(true)
+            setPadding(0, pad / 3, 0, 0)
+        }
+        offerCard.addView(offerCode)
+        offerCard.addView(offerExpiry)
+        offerCard.addView(TextView(this).apply {
+            text = NodePairing.CODE_HOWTO
+            textSize = 13f
+            setTextColor(Color.parseColor("#B0B0B0"))
+            setPadding(0, pad / 4, 0, 0)
+        })
+        offerCard.addView(offerText)
+        offerCard.addView(TextView(this).apply {
+            text = NodePairing.TEXT_WARNING
+            textSize = 12f
+            setTextColor(Color.parseColor("#808080"))
+        })
+        val offerButtons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        offerButtons.addView(Button(this).apply {
+            text = NodePairing.COPY
+            isAllCaps = false
+            setOnClickListener { copyPairText() }
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        offerButtons.addView(Button(this).apply {
+            text = NodePairing.STOP
+            isAllCaps = false
+            setOnClickListener { stopPairCode() }
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        offerCard.addView(offerButtons)
+        root.addView(offerCard, fullWidth().apply { topMargin = pad / 3 })
+        pairedBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(pairedBox, fullWidth())
         root.gravity = Gravity.CENTER_HORIZONTAL
         root.setPadding(pad, pad * 2, pad, pad * 2)
         setContentView(ScrollView(this).apply {
@@ -193,6 +281,7 @@ class MainActivity : Activity() {
             addView(root)
         })
         showPeers()
+        showPairing()
     }
 
     private fun fullWidth() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -267,6 +356,151 @@ class MainActivity : Activity() {
             .setPositiveButton("Remove") { _, _ ->
                 PeerList.write(this, PeerList.read(this).filter { it != peer })
                 showPeers()
+            }
+            .show()
+    }
+
+    // ---- Pair a device (daemon v8.24.0) ----
+
+    private fun showPairing() {
+        val on = NodePrefs.isOn(this)
+        val (text, color) = if (on) NodePairing.quietLine(pairing?.optJSONObject("quiet"))
+            else "Quiet mode: off (turn on Network first)" to "#808080"
+        quietLine.text = text
+        quietLine.setTextColor(Color.parseColor(color))
+        val o = if (on) offer else null
+        if (o != null) {
+            offerCode.text = NodePairing.codeDisplay(o.optString("code"))
+            offerExpiry.text = NodePairing.expires(o.optInt("expires_in"), o.optInt("attempts_left"))
+            offerText.text = o.optString("payload")
+            offerCard.visibility = android.view.View.VISIBLE
+        } else {
+            offerCard.visibility = android.view.View.GONE
+        }
+        pairedBox.removeAllViews()
+        val peers = pairing?.optJSONArray("peers")
+        if (peers == null || peers.length() == 0) {
+            pairedBox.addView(TextView(this).apply {
+                text = NodePairing.NONE
+                textSize = 15f
+                setTextColor(Color.parseColor("#808080"))
+                setPadding(0, 12, 0, 12)
+            })
+        } else {
+            for (i in 0 until peers.length()) {
+                val p = peers.getJSONObject(i)
+                pairedBox.addView(TextView(this).apply {
+                    text = NodePairing.pairedLine(p)
+                    textSize = 15f
+                    setTextColor(Color.parseColor(if (p.optBoolean("online")) "#4CAF50" else "#B0B0B0"))
+                    setPadding(0, 12, 0, 12)
+                    setOnClickListener { removePaired(p) }
+                })
+            }
+        }
+    }
+
+    /** Off the main thread: the paired list, and the offer's state while a code shows. */
+    private fun fetchPairing() {
+        val list = NodePairing.list(this)
+        var ended: String? = null
+        var newOffer = offer
+        if (offer != null) {
+            val st = NodePairing.offerStatus(this)
+            if (st.code == 200 && st.body.optBoolean("active")) newOffer = st.body
+            else if (st.code == 200) { newOffer = null; ended = st.body.optString("ended") }
+        }
+        ui.post {
+            if (list.code == 200) pairing = list.body
+            offer = newOffer
+            showPairing()
+            when (ended) {
+                null -> {}
+                "paired" -> toast(NodePairing.DONE)
+                "locked" -> toast(NodePairing.LOCKED)
+                else -> toast(NodePairing.ENDED)
+            }
+        }
+    }
+
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+
+    private fun showPairCode() {
+        if (!NodePrefs.isOn(this)) { toast("Turn on Network first."); return }
+        io.execute {
+            val r = NodePairing.offer(this)
+            ui.post {
+                if (r.code == 200 && r.body.optBoolean("active")) offer = r.body
+                else toast(r.body.optString("message").ifEmpty { "The node answered ${r.code}" })
+                showPairing()
+            }
+        }
+    }
+
+    private fun stopPairCode() {
+        offer = null
+        showPairing()
+        io.execute { NodePairing.cancel(this) }
+    }
+
+    private fun copyPairText() {
+        val payload = offer?.optString("payload").orEmpty()
+        if (payload.isEmpty()) return
+        val clip = ClipData.newPlainText("Omni pairing text", payload)
+        clip.description.extras = PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
+        getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
+        Toast.makeText(this, "Pairing text copied.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun enterPairCodeDialog() {
+        if (!NodePrefs.isOn(this)) { toast("Turn on Network first."); return }
+        val input = EditText(this).apply {
+            hint = "123 456"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            isSingleLine = true
+        }
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val box = LinearLayout(this).apply { setPadding(pad, pad / 2, pad, 0); addView(input, fullWidth()) }
+        AlertDialog.Builder(this)
+            .setTitle(NodePairing.ENTER)
+            .setMessage(NodePairing.ENTER_HOWTO)
+            .setView(box)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Pair") { _, _ ->
+                val body = NodePairing.parseInput(input.text.toString())
+                if (body == null) {
+                    toast("Type the 6-digit code, or paste the pairing text.")
+                } else {
+                    toast(NodePairing.LOOKING)
+                    io.execute {
+                        val r = NodePairing.accept(this, body)
+                        ui.post {
+                            toast(when (r.code) {
+                                200 -> NodePairing.DONE
+                                403 -> NodePairing.WRONG
+                                410 -> NodePairing.LOCKED
+                                else -> r.body.optString("message").ifEmpty { "The node answered ${r.code}" }
+                            })
+                        }
+                        fetchPairing()
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun removePaired(p: JSONObject) {
+        val name = p.optString("name").ifEmpty { "this device" }
+        AlertDialog.Builder(this)
+            .setTitle(NodePairing.REMOVE)
+            .setMessage(NodePairing.removeConfirm(name))
+            .setNegativeButton("Keep", null)
+            .setPositiveButton(NodePairing.REMOVE) { _, _ ->
+                io.execute {
+                    val r = NodePairing.remove(this, p.optString("pubkey"))
+                    if (r.code != 200) ui.post { toast(r.body.optString("message").ifEmpty { "The node answered ${r.code}" }) }
+                    fetchPairing()
+                }
             }
             .show()
     }
@@ -392,11 +626,12 @@ class MainActivity : Activity() {
         override fun run() {
             if (!NodePrefs.isOn(this@MainActivity)) {
                 show(NodeStatus(NodeStatus.OFF))
-                showWan(NodeStatus(NodeStatus.OFF)); showRadios(); showRelay(NodeStatus(NodeStatus.OFF))
+                showWan(NodeStatus(NodeStatus.OFF)); showRadios(); showRelay(NodeStatus(NodeStatus.OFF)); showPairing()
             } else {
                 io.execute {
                     val s = NodeStatus.fetch(this@MainActivity)
                     ui.post { show(s); showWan(s); showRadios(); showPeers(); showRelay(s) }
+                    fetchPairing()
                 }
             }
             ui.postDelayed(this, 3_000L)
