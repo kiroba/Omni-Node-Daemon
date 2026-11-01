@@ -17,19 +17,29 @@ the daemon is ever merged into Omni-Hub.)
   battery optimisation.
 - **Locked loopback:** sets `OMNI_LOCAL_TOKEN=1` (daemon v8.19.0+), so other apps on the phone can't
   use `:5000`/`:9100` without the token in the app's private storage.
+- **Nearby radios (0.2.0):** BLE and Wi-Fi Aware discovery live in Omni Node, with an Add peer
+  list and an Internet status line (reachable directly, through the router, or not yet).
+- **Relay calls (0.3.0, opt-in, off by default):** lets this phone relay OmniCast calls for people
+  who can't connect directly. It only relays while the phone is **charging and on unmetered
+  Wi-Fi/Ethernet**, never on mobile data, with a daily cap (250 MB, 1 GB default, 5 GB). The card
+  shows why it's waiting, active calls, MB used today, and whether the router opened the ports.
+  Desktops running Omni-Daemon relay by default, so phones are only a backup.
 
 ## One copy of the daemon
 The Python daemon is developed and tested only in kiroba/Omni-Daemon. This repo packages it:
-`scripts/fetch_daemon.sh <ref>` copies `omni_live_daemon_server.py`, `omni_signing.py` and
-`omni_negentropy.py` into `app/src/main/python/` at build time (git-ignored here). Embedded with
-[Chaquopy](https://chaquo.com/chaquopy/) (Python 3.11 + `cryptography`).
+`scripts/fetch_daemon.sh <ref>` copies `omni_live_daemon_server.py` plus every `omni_*` module it
+imports (signing, negentropy, wan, relay...) into `app/src/main/python/` at build time (git-ignored
+here; the list lands in `DAEMON_FILES`). Embedded with [Chaquopy](https://chaquo.com/chaquopy/)
+(Python 3.11 + `cryptography`).
 
 ## Build
 CI (`.github/workflows/build.yml`) runs an entry smoke test on CPython and builds a debug APK
-(arm64-v8a + x86_64), uploaded as an artifact. Manual run: Actions > build > Run workflow,
+(arm64-v8a + x86_64), uploaded as an artifact. The APK job only runs once the smoke test passes. Manual run: Actions > build > Run workflow,
 optionally with a daemon tag.
 
 ## Not yet
+- Field tests of Relay calls: charging/Wi-Fi gating, router port mapping, and calls between
+  different networks.
 - Automatic token handoff to other Omni apps (needs one signing key across the apps). For now, **Connect apps** shows the token behind the screen lock to paste into each app.
 - Real-phone field test (the gate before any Omni-Hub merge).
 - Release signing / developer registration (limited-distribution account).
