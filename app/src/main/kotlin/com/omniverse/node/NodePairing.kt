@@ -6,7 +6,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Pair a device (daemon v8.24.0 quiet mesh): the words, and the loopback calls to :5000/api/pair/*.
+ * Pair a device (daemon v8.24.0 quiet mesh): the words, and the loopback calls to the :5000 pairing API.
  *
  * The words are the same as the desktop Omni Node (kiroba/Omni-Daemon Admin/omni_node_words.py,
  * pinned by tests/test_node_desktop.py SameWordsAsAndroid.test_pairing_words). Change both together.
