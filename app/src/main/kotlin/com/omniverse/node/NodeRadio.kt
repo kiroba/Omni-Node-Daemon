@@ -50,9 +50,9 @@ import java.util.concurrent.Executors
  *   Proximity only (BLE gives no IP), shown as "nearby" in the status.
  * - Wi-Fi Aware: publish + subscribe "omniverse", info {"h": key, "p": port}; on Android 10+ a
  *   PSK data path gives the peer's IPv6 address, which is handed to the daemon.
- * - Added peers (the Add peer list) are handed to the daemon too.
- * Every peer with an address is re-posted to loopback POST /api/sync/peers every 60 s (the daemon
- * forgets radio peers after 120 s), with the local token.
+ * Every radio peer with an address is re-posted to loopback POST /api/sync/peers every 60 s (the daemon
+ * forgets radio peers after 120 s), with the local token. Added peers (the Add peer list) are the
+ * shared core's job now (omni_node_core duties()), the same code as on desktop.
  * Status goes to files/radio_status.json for the screen (it runs in another process).
  */
 @SuppressLint("MissingPermission")
@@ -126,15 +126,10 @@ class NodeRadio(private val context: Context) {
         io.shutdown()
     }
 
-    /** Called when the Add peer list changes: hand the list in now. */
-    fun peersChanged() = main.post { main.removeCallbacks(refresh); refresh.run() }
-
     private val refresh = object : Runnable {
         override fun run() {
             if (!running) return
-            val manual = PeerList.read(context)
             io.execute {
-                for (m in manual) post(m.host, m.port, "manual", "")
                 for ((host, v) in addressed) post(host, v.first, v.second, v.third)
                 writeStatus()
             }
@@ -143,7 +138,7 @@ class NodeRadio(private val context: Context) {
     }
 
     private fun post(host: String, p: Int, transport: String, key: String) {
-        val token = NodeStatus.localToken(context) ?: return
+        val token = NodePrefs.localToken(context) ?: return
         val id = "$host:$p"
         handedIn[id] = try {
             val c = URL("http://127.0.0.1:5000/api/sync/peers").openConnection() as HttpURLConnection
@@ -371,39 +366,5 @@ class NodeRadio(private val context: Context) {
         try { subscribeSession?.close() } catch (_: Throwable) {}
         try { awareSession?.close() } catch (_: Throwable) {}
         publishSession = null; subscribeSession = null; awareSession = null; awareState = "off"
-    }
-}
-
-/** The Add peer list: one "host[:port]" per line in files/peers.txt (shared by both processes). */
-object PeerList {
-    data class Peer(val host: String, val port: Int) {
-        override fun toString() = if (port == 5005) host else (if (host.contains(':')) "[$host]:$port" else "$host:$port")
-    }
-
-    private fun file(c: Context) = File(c.filesDir, "peers.txt")
-
-    fun read(c: Context): List<Peer> = try {
-        file(c).readLines().mapNotNull { parse(it) }
-    } catch (_: Exception) { emptyList() }
-
-    fun write(c: Context, peers: List<Peer>) = file(c).writeText(peers.distinct().joinToString("\n") { it.toString() })
-
-    /** "1.2.3.4", "1.2.3.4:5006", "host.example.com", "[2001:db8::1]:5005", "2001:db8::1". Null if malformed. */
-    fun parse(raw: String): Peer? {
-        val s = raw.trim().removePrefix("http://").removeSuffix("/")
-        if (s.isEmpty()) return null
-        var host = s
-        var port = 5005
-        if (s.startsWith("[")) {
-            val end = s.indexOf(']'); if (end < 0) return null
-            host = s.substring(1, end)
-            val rest = s.substring(end + 1)
-            if (rest.startsWith(":")) port = rest.drop(1).toIntOrNull() ?: return null
-        } else if (s.count { it == ':' } == 1) {
-            host = s.substringBefore(':'); port = s.substringAfter(':').toIntOrNull() ?: return null
-        }
-        if (port !in 1..65535) return null
-        if (!Regex("[A-Za-z0-9.\\-:%_]{1,255}").matches(host)) return null
-        return Peer(host, port)
     }
 }

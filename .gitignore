@@ -10,3 +10,6 @@ app/src/main/python/omni_*.py
 !app/src/main/python/omni_node_entry.py
 app/src/main/python/DAEMON_REF
 app/src/main/python/DAEMON_FILES
+app/src/main/python/NODE_VERSION
+__pycache__/
+app/src/main/python/omni_node_version.py

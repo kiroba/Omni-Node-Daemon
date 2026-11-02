@@ -1,4 +1,8 @@
 name: build
+# One Omni Node, every platform. A v* tag (e.g. v0.5.0-prealpha, must start with v<VERSION>) builds
+# and publishes, in ONE release: the Android APK plus the desktop archives for Windows, Linux and macOS,
+# all from the same Omni-Daemon commit (resolved once below) and the same VERSION. Releases are
+# immutable, so publish only runs after every asset is built and checked.
 on:
   push:
     branches: [main]
@@ -11,71 +15,65 @@ on:
         default: "main"
 
 env:
+  # TEMPORARY: the shared core (Omni-Daemon PR #17, daemon 8.27.0) isn't on Omni-Daemon main yet.
+  # Switch this default back to 'main' once #17 merges, BEFORE tagging a release.
   DAEMON_REF: ${{ github.event.inputs.daemon_ref || 'main' }}
 
 permissions:
-  contents: write   # tag builds publish a pre-release with the APK
+  contents: read
 
 jobs:
+  resolve:
+    # Pins one Omni-Daemon commit for every job in this run (a moving branch can't split the release),
+    # and checks VERSION (and the tag, on tag builds).
+    runs-on: ubuntu-latest
+    outputs:
+      daemon_sha: ${{ steps.r.outputs.daemon_sha }}
+      version: ${{ steps.r.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d ' \r\n' < VERSION)"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::VERSION must be x.y.z, got '$VERSION'"; exit 1; }
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            [[ "$TAG" == "v$VERSION" || "$TAG" == "v$VERSION"-* ]] || { echo "::error::tag $TAG doesn't match VERSION $VERSION"; exit 1; }
+          fi
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/kiroba/Omni-Daemon.git d
+          SHA="$(git -C d rev-parse --verify --quiet "origin/$DAEMON_REF^{commit}" || git -C d rev-parse --verify "$DAEMON_REF^{commit}")"
+          echo "Omni Node $VERSION, Omni-Daemon $DAEMON_REF = $SHA"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "daemon_sha=$SHA" >> "$GITHUB_OUTPUT"
+
+  parity:
+    # The Kotlin shell must not spell out Node words: they come from the shared core.
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: scripts/fetch_daemon.sh "${{ needs.resolve.outputs.daemon_sha }}"
+      - run: python scripts/check_parity.py
+
   entry-smoke:
-    # Runs omni_node_entry.start() on plain CPython the way the app does (HOME = files dir,
-    # OMNI_LOCAL_TOKEN=1) and checks the token gate from outside. No phone needed.
+    # Runs omni_node_entry the way the app does (HOME = files dir, OMNI_LOCAL_TOKEN=1) plus the shared
+    # core through the same entry functions the Kotlin screens call. No phone needed.
+    needs: resolve
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: pip install cryptography
-      - run: scripts/fetch_daemon.sh "$DAEMON_REF"
-      - name: Start the node like the app does
-        run: |
-          python - <<'PY'
-          import json, os, sys, tempfile, time, urllib.request, urllib.error
-          sys.path.insert(0, "app/src/main/python")
-          files = tempfile.mkdtemp(prefix="files_")
-          import omni_node_entry as e
-          assert e.start(files)
-          tok_path = os.path.join(files, ".omni", "local_token")
-          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-          url = "http://127.0.0.1:9100/api/v1/telemetry/node-health"
-          for _ in range(100):
-              if os.path.exists(tok_path):
-                  try:
-                      req = urllib.request.Request(url, headers={"X-Omni-Local-Token": open(tok_path).read().strip()})
-                      body = json.loads(opener.open(req, timeout=2).read())
-                      break
-                  except Exception:
-                      pass
-              time.sleep(0.2)
-          else:
-              sys.exit("node did not come up with a local token: " + e.error())
-          print("node", body["node_id"][:8], "version", body["version"], "peers", body.get("active_peers"))
-          try:
-              opener.open(url, timeout=2)
-              sys.exit("FAIL: node-health answered without the local token")
-          except urllib.error.HTTPError as err:
-              assert err.code == 401, err.code
-          print("OK: token required on :9100; daemon ref", e.daemon_ref())
-          # Pair a device (daemon v8.24.0+): the pairing API answers on loopback with the token, and an
-          # unpaired node starts with quiet mode off (testers keep the old behaviour until they pair).
-          tok = open(tok_path).read().strip()
-          try:
-              req = urllib.request.Request("http://127.0.0.1:5000/api/pair/list", headers={"X-Omni-Local-Token": tok})
-              pl = json.loads(opener.open(req, timeout=5).read())
-              assert pl["quiet"]["mode"] == "auto" and pl["quiet"]["active"] is False and pl["peers"] == [], pl
-              req = urllib.request.Request("http://127.0.0.1:5000/api/pair/offer", data=b"{}", method="POST",
-                                           headers={"X-Omni-Local-Token": tok, "Content-Type": "application/json"})
-              off = json.loads(opener.open(req, timeout=10).read())
-              assert off["active"] and len(off["code"]) == 6 and off["payload"].startswith("omni://pair?p="), off
-              print("OK: pairing API (quiet mesh) works on Python", sys.version.split()[0])
-          except urllib.error.HTTPError as err:
-              if err.code != 404:
-                  raise
-              print("daemon has no pairing API yet (< v8.24.0): Pair a device will say the node needs an update")
-          PY
+      - run: scripts/fetch_daemon.sh "${{ needs.resolve.outputs.daemon_sha }}"
+      - run: python scripts/entry_smoke.py
+        env: { NO_PROXY: "127.0.0.1,localhost", OMNI_RELAY: "off" }
 
   apk:
-    needs: entry-smoke   # never build or publish an APK whose daemon fails to start
+    needs: [resolve, entry-smoke, parity]   # never build an APK whose daemon fails to start
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,18 +83,132 @@ jobs:
         with: { python-version: "3.11" }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: "8.10.2" }
-      - run: scripts/fetch_daemon.sh "$DAEMON_REF"
+      - run: scripts/fetch_daemon.sh "${{ needs.resolve.outputs.daemon_sha }}"
       - run: gradle :app:assembleDebug --stacktrace
-      - name: APK size
-        run: ls -l app/build/outputs/apk/debug/
+      - name: APK size and contents (shared core + Node version packaged)
+        run: |
+          set -euo pipefail
+          ls -l app/build/outputs/apk/debug/
+          python - <<'PY'
+          import io, zipfile
+          apk = zipfile.ZipFile("app/build/outputs/apk/debug/app-debug.apk")
+          imy = [n for n in apk.namelist() if n.startswith("assets/chaquopy/") and n.endswith("app.imy")]
+          assert imy, [n for n in apk.namelist() if n.startswith("assets/chaquopy/")][:20]
+          names = zipfile.ZipFile(io.BytesIO(apk.read(imy[0]))).namelist()
+          need = ["omni_node_core", "omni_node_words", "omni_node_version", "omni_node_entry", "omni_live_daemon_server"]
+          missing = [m for m in need if not any(n.startswith(m + ".") for n in names)]
+          assert not missing, (missing, names)
+          print("APK packages:", sorted(n for n in names if n.startswith("omni_")))
+          PY
       - uses: actions/upload-artifact@v4
         with:
-          name: omni-node-daemon-debug
-          path: app/build/outputs/apk/debug/*.apk
-      - name: Publish pre-release (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+          name: omni-node-android
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  desktop:
+    # Same approach as The-Omniverse omni-node-windows.yml: Python sources + a launcher, smoke-tested.
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, platform: windows, asset: omni-node-windows-x64.zip }
+          - { os: ubuntu-latest, platform: linux, asset: omni-node-linux.tar.gz }
+          # macOS dropped for now (Nov 2 2026): its free runner sat queued 20+ min and would block an immutable release.
+          # - { os: macos-latest, platform: macos, asset: omni-node-macos.tar.gz }
+    name: desktop · ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out Omni-Daemon (same commit as the APK)
+        uses: actions/checkout@v4
+        with:
+          repository: kiroba/Omni-Daemon
+          ref: ${{ needs.resolve.outputs.daemon_sha }}
+          path: daemon
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Package
+        shell: bash
+        env: { PYTHONUTF8: "1" }
+        run: python scripts/package_desktop.py --daemon daemon --platform ${{ matrix.platform }} --stage omni-node
+      - name: Smoke test (the packaged daemon starts, the shell and core import, same Node version)
+        shell: bash
+        working-directory: omni-node
+        env: { PYTHONUTF8: "1", OMNI_RELAY: "off", OMNI_UPNP: "0", NO_PROXY: "127.0.0.1,localhost", OMNI_NODE_AUTO_UPDATE: "0" }
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet cryptography
+          python -c "import omni_node_desktop, omni_node_core as C; v = C.node_version(); assert v == open('NODE_VERSION').read().strip() == '${{ needs.resolve.outputs.version }}', v; print('ui import ok, Omni Node', v)"
+          python omni_live_daemon_server.py > d.log 2> d.err &
+          PID=$!
+          ok=0
+          for i in $(seq 1 40); do
+            sleep 1
+            if python -c "import urllib.request,json,sys; o=urllib.request.build_opener(urllib.request.ProxyHandler({})); print('daemon v'+json.load(o.open('http://127.0.0.1:9100/api/v1/telemetry/node-health', timeout=2))['version'])"; then ok=1; break; fi
+          done
+          if [ "$ok" != 1 ]; then kill $PID 2>/dev/null || true; tail -n 40 d.log d.err; echo "::error::packaged daemon did not start"; exit 1; fi
+          python - <<'PY'
+          import json, omni_node_core as C
+          core = C.NodeCore(env={"platform": "${{ matrix.platform }}", "autostart_available": True})
+          core.refresh()
+          st = core.ui_state()
+          print("core:", st["status"]["line"], "|", st["version_line"])
+          assert st["daemon_version"], st["status"]
+          PY
+          kill $PID 2>/dev/null || true
+          sleep 2
+          rm -f d.log d.err
+      - name: Archive
+        shell: bash
+        run: |
+          python scripts/package_desktop.py archive omni-node ${{ matrix.platform }} dist
+          test "$(python scripts/package_desktop.py version dist/${{ matrix.asset }})" = "${{ needs.resolve.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omni-node-${{ matrix.platform }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    # Tags only. Releases are immutable: check the whole asset set first, then publish once.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [resolve, apk, desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: Verify the asset set
+        run: |
+          set -euo pipefail
+          mkdir dist
+          for f in app-debug.apk omni-node-windows-x64.zip omni-node-linux.tar.gz; do
+            p="$(find artifacts -name "$f" -type f | head -n1)"
+            [ -n "$p" ] || { echo "::error::missing $f: not publishing"; exit 1; }
+            cp "$p" dist/
+          done
+          for f in omni-node-windows-x64.zip omni-node-linux.tar.gz; do
+            v="$(python3 scripts/package_desktop.py version "dist/$f")"
+            [ "$v" = "${{ needs.resolve.outputs.version }}" ] || { echo "::error::$f says Omni Node $v"; exit 1; }
+          done
+          ls -l dist
+      - uses: softprops/action-gh-release@v2
         with:
           prerelease: true
-          files: app/build/outputs/apk/debug/app-debug.apk
-          body: "Pre-alpha test build of Omni Node (debug signing key, arm64 + x86_64). Packages Omni-Daemon main (v8.22.0+: local token on, Internet reach, opt-in Relay calls on Wi-Fi + charging). Connect apps shows the node token behind your screen lock; paste it into KickBack / Mesh Monitor Hub settings (Remote hub, 127.0.0.1). New debug key per build: uninstall the old Omni Node first."
+          fail_on_unmatched_files: true
+          files: |
+            dist/app-debug.apk
+            dist/omni-node-windows-x64.zip
+            dist/omni-node-linux.tar.gz
+          body: |
+            Pre-alpha test build of **Omni Node ${{ needs.resolve.outputs.version }}**: one app on every platform, built from one shared core (Omni-Daemon `${{ needs.resolve.outputs.daemon_sha }}`).
+
+            - **Android**: `app-debug.apk` (debug signing key, arm64 + x86_64). A new debug key per build: uninstall the old Omni Node first.
+            - **Windows**: `omni-node-windows-x64.zip`. Needs Python 3.12; double-click `Start Omni Node.cmd`.
+            - **Linux**: `omni-node-linux.tar.gz`. (macOS: run from source for now.) Needs Python 3.12 with Tk; run `./start-omni-node.sh`.
+
+            Same screen, words and version everywhere. Connect apps shows the node token (behind the screen lock on phones); paste it into KickBack / Mesh Monitor Hub settings (Remote hub, 127.0.0.1).

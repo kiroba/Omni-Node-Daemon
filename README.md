@@ -32,6 +32,26 @@ the daemon is ever merged into Omni-Hub.)
   behave as before. The daemon side is documented in Omni-Daemon `Admin/docs/QUIET_MESH.md`. No QR
   drawing on the phone yet (no QR library in the app); the desktop draws one when `qrcode` is installed.
 
+## One app, every platform (0.5.0)
+Omni Node on Android and on the desktop (Windows, macOS, Linux) is **one app**: the screen state and
+every action come from one shared core in Omni-Daemon (`Admin/omni_node_core.py`, words in
+`omni_node_words.py`). The Kotlin code here only renders the core's `ui_state()` and sends taps to
+`do()` through Chaquopy (`NodeCore.kt`, `omni_node_entry.py`). It keeps just the Android environment:
+the foreground service and boot start, permissions, radios, charging/Wi-Fi/battery-saver facts
+(`NodeEnv.kt`), the screen lock before the token, the clipboard and the notification. CI's `parity` job
+(`scripts/check_parity.py`) fails if a `.kt` file spells out Node words. Architecture, env adapter and
+iOS notes: Omni-Daemon `Admin/docs/NODE_SHARED_CORE.md`.
+
+New with the shared core, on both platforms at once: an **Internet** switch ("Open a port on my
+router"), **Check for updates** (newest release here, daily and on demand) and the version line
+"Omni Node 0.5.0 · daemon v8.27.0".
+
+**One version, one release.** `VERSION` is the only Omni Node version. Gradle reads it for the APK,
+and `fetch_daemon.sh` / `scripts/package_desktop.py` write it into the APK and every desktop archive.
+One `v*` tag (it must start with `v<VERSION>`) builds the APK plus `omni-node-windows-x64.zip`,
+`omni-node-linux.tar.gz` and `omni-node-macos.tar.gz` from the same Omni-Daemon commit. Each desktop
+archive is smoke-tested on its own OS. The release is published only after the whole set is checked.
+
 ## One copy of the daemon
 The Python daemon is developed and tested only in kiroba/Omni-Daemon. This repo packages it:
 `scripts/fetch_daemon.sh <ref>` copies `omni_live_daemon_server.py` plus every `omni_*` module it
@@ -40,9 +60,11 @@ here; the list lands in `DAEMON_FILES`). Embedded with [Chaquopy](https://chaquo
 (Python 3.11 + `cryptography`).
 
 ## Build
-CI (`.github/workflows/build.yml`) runs an entry smoke test on CPython and builds a debug APK
-(arm64-v8a + x86_64), uploaded as an artifact. The APK job only runs once the smoke test passes. Manual run: Actions > build > Run workflow,
-optionally with a daemon tag.
+CI (`.github/workflows/build.yml`) pins one Omni-Daemon commit, runs the parity check and an entry
+smoke test on CPython (the daemon plus the shared core through the same calls the Kotlin screens make),
+builds a debug APK (arm64-v8a + x86_64) and checks that the core is inside it, and builds and
+smoke-tests the three desktop archives. Tags publish all four in one pre-release. Manual run:
+Actions > build > Run workflow, optionally with a daemon tag.
 
 ## Not yet
 - Field tests of Relay calls: charging/Wi-Fi gating, router port mapping, and calls between
