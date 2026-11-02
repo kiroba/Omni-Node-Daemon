@@ -16,27 +16,34 @@ import android.os.IBinder
 import android.os.Process
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
+import org.json.JSONObject
 
 /**
  * Always-on node: runs the embedded Omni-Daemon in this service's own process (":daemon").
  * ON  -> foreground service (START_STICKY) with a status notification.
  * OFF -> stopSelf(), then the process exits, so the OS closes :5000 / :9100 / :5005 / :9101.
+ *
+ * Android environment only. What the node should do (Relay calls policy, router port, re-handing added
+ * peers, the status line) is the shared core's duties(), called every 15 s and whenever charging, the
+ * network or a setting changes. This service keeps the process, the notification, the radios and the
+ * multicast / Wi-Fi locks.
  */
 class OmniDaemonService : Service() {
     private var worker: HandlerThread? = null
     private var handler: Handler? = null
     private var multicastLock: WifiManager.MulticastLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private var lastLine = ""
     private var radio: NodeRadio? = null
-    private var relay: NodeRelay? = null
+    private var envWatcher: NodeEnvWatcher? = null
+    private var words = JSONObject()
 
     companion object {
         private const val CHANNEL = "omni_node_status"
         private const val NOTE_ID = 1
         private const val ACTION_STOP = "com.omniverse.node.STOP"
-        private const val ACTION_PEERS = "com.omniverse.node.PEERS"
+        private const val ACTION_KICK = "com.omniverse.node.KICK"
         private const val ACTION_RADIOS = "com.omniverse.node.RADIOS"
-        private const val ACTION_RELAY = "com.omniverse.node.RELAY"
         private const val POLL_MS = 15_000L
 
         fun start(c: Context) {
@@ -44,19 +51,14 @@ class OmniDaemonService : Service() {
             if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(i) else c.startService(i)
         }
 
-        /** The Add peer list changed: hand it to the daemon now. No-op when the node is off. */
-        fun peersChanged(c: Context) {
-            if (NodePrefs.isOn(c)) c.startService(Intent(c, OmniDaemonService::class.java).setAction(ACTION_PEERS))
+        /** A Node setting changed (peers, relay, router port): run the core's duties now. No-op when off. */
+        fun kick(c: Context) {
+            if (NodePrefs.isOn(c)) c.startService(Intent(c, OmniDaemonService::class.java).setAction(ACTION_KICK))
         }
 
         /** Radio permissions were just granted: restart the radios with them. */
         fun radiosChanged(c: Context) {
             if (NodePrefs.isOn(c)) c.startService(Intent(c, OmniDaemonService::class.java).setAction(ACTION_RADIOS))
-        }
-
-        /** Relay calls setting changed: apply it now. No-op when the node is off. */
-        fun relayChanged(c: Context) {
-            if (NodePrefs.isOn(c)) c.startService(Intent(c, OmniDaemonService::class.java).setAction(ACTION_RELAY))
         }
 
         fun stop(c: Context) {
@@ -68,25 +70,22 @@ class OmniDaemonService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            NodePrefs.setOn(this, false)
+            NodePrefs.setOff(this)
             stopForegroundCompat()
             stopSelf()
             return START_NOT_STICKY
         }
-        if (intent?.action == ACTION_PEERS && worker != null) {
-            radio?.peersChanged()
-            return START_STICKY
-        }
-        if (intent?.action == ACTION_RELAY && worker != null) {
-            relay?.evaluate()
+        if (intent?.action == ACTION_KICK && worker != null) {
+            handler?.post { tick(forcePeers = true) }
             return START_STICKY
         }
         if (intent?.action == ACTION_RADIOS && worker != null) {
             radio?.stop()
-            radio = null      // the next poll starts them again with the new permissions
+            radio = null      // the next tick starts them again with the new permissions
             return START_STICKY
         }
-        goForeground(NodeStatus.STARTING)
+        words = NodeCore.words(this, live = false)     // cached labels until Python is up
+        goForeground(words.optString("STARTING"))
         if (worker == null) startNode()
         return START_STICKY
     }
@@ -99,9 +98,14 @@ class OmniDaemonService : Service() {
             try {
                 acquireMulticastLock()
                 if (!Python.isStarted()) Python.start(AndroidPlatform(this))
-                Python.getInstance().getModule("omni_node_entry").callAttr("start", filesDir.absolutePath, android.os.Build.MODEL ?: "Android phone")
+                Python.getInstance().getModule("omni_node_entry")
+                    .callAttr("start", filesDir.absolutePath, Build.MODEL ?: "Android phone")
+                words = NodeCore.words(this, live = true)
             } catch (t: Throwable) {
-                update(NodeStatus.problem("the node couldn't start (${t.javaClass.simpleName})"))
+                update(t.javaClass.simpleName)
+            }
+            envWatcher = NodeEnvWatcher(this) { handler?.post { tick(forcePeers = false) } }.also {
+                android.os.Handler(mainLooper).post { it.start() }
             }
             handler?.postDelayed(poll, 2_000L)
         }
@@ -109,35 +113,28 @@ class OmniDaemonService : Service() {
 
     private val poll = object : Runnable {
         override fun run() {
-            val err = try {
-                Python.getInstance().getModule("omni_node_entry").callAttr("error").toString()
-            } catch (_: Throwable) {
-                ""
-            }
-            if (err.isNotEmpty()) {
-                update(NodeStatus.problem(err.take(80)))
-            } else {
-                val s = NodeStatus.fetch(this@OmniDaemonService)
-                update(s.line)
-                // Radios start once the daemon answers with its key (the BLE / Wi-Fi Aware id).
-                if (radio == null && s.nodeId.isNotEmpty()) {
-                    val r = NodeRadio(this@OmniDaemonService)
-                    radio = r
-                    android.os.Handler(mainLooper).post { r.start(s.nodeId) }
-                }
-                // Phone relay (off unless "Relay calls" is on; Wi-Fi + charging only).
-                if (relay == null && s.nodeId.isNotEmpty()) {
-                    val rl = NodeRelay(this@OmniDaemonService)
-                    relay = rl
-                    android.os.Handler(mainLooper).post { rl.start() }
-                }
-            }
+            tick(forcePeers = false)
             handler?.postDelayed(this, POLL_MS)
         }
     }
 
+    /** One pass of the core's duties (on the worker thread), then the Android side of its answer. */
+    private fun tick(forcePeers: Boolean) {
+        val r = try { NodeCore.duties(this, forcePeers) } catch (t: Throwable) { null } ?: return
+        update(r.optString("line"))
+        val nodeId = r.optString("node_id")
+        // Radios start once the daemon answers with its key (the BLE / Wi-Fi Aware id).
+        if (radio == null && nodeId.isNotEmpty()) {
+            val rd = NodeRadio(this)
+            radio = rd
+            android.os.Handler(mainLooper).post { rd.start(nodeId) }
+        }
+        // The core decided whether this phone relays now; keep Wi-Fi awake only while it does.
+        if (r.optBoolean("relay_active")) acquireWifiLock() else releaseWifiLock()
+    }
+
     private fun update(line: String) {
-        if (line == lastLine) return
+        if (line.isEmpty() || line == lastLine) return
         lastLine = line
         getSystemService(NotificationManager::class.java).notify(NOTE_ID, buildNote(line))
     }
@@ -156,8 +153,9 @@ class OmniDaemonService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         if (nm.getNotificationChannel(CHANNEL) == null) {
             nm.createNotificationChannel(
-                NotificationChannel(CHANNEL, "Network status", NotificationManager.IMPORTANCE_LOW).apply {
-                    description = "Shows whether your Omni node is on and who it's connected to."
+                NotificationChannel(CHANNEL, words.optString("NOTIF_CHANNEL", getString(R.string.app_name)),
+                    NotificationManager.IMPORTANCE_LOW).apply {
+                    description = words.optString("NOTIF_CHANNEL_DESC")
                     setShowBadge(true)
                 }
             )
@@ -172,12 +170,12 @@ class OmniDaemonService : Service() {
         )
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_node)
-            .setContentTitle("Omni Node")
+            .setContentTitle(words.optString("TITLE", getString(R.string.app_name)))
             .setContentText(line)
             .setContentIntent(open)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .addAction(Notification.Action.Builder(null, "Turn off", off).build())
+            .addAction(Notification.Action.Builder(null, words.optString("NOTIF_TURN_OFF", "\u23FB"), off).build())
             .build()
     }
 
@@ -189,6 +187,21 @@ class OmniDaemonService : Service() {
         }
     }
 
+    @Suppress("DEPRECATION")
+    private fun acquireWifiLock() {
+        if (wifiLock?.isHeld == true) return
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
+        wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "omni-node-relay").apply {
+            setReferenceCounted(false)
+            try { acquire() } catch (_: Exception) {}
+        }
+    }
+
+    private fun releaseWifiLock() {
+        try { if (wifiLock?.isHeld == true) wifiLock?.release() } catch (_: Exception) {}
+        wifiLock = null
+    }
+
     private fun stopForegroundCompat() {
         if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE) else @Suppress("DEPRECATION") stopForeground(true)
     }
@@ -196,7 +209,8 @@ class OmniDaemonService : Service() {
     override fun onDestroy() {
         handler?.removeCallbacksAndMessages(null)
         try { radio?.stop() } catch (_: Throwable) {}
-        try { relay?.stop() } catch (_: Throwable) {}
+        try { envWatcher?.stop() } catch (_: Throwable) {}
+        releaseWifiLock()
         try {
             multicastLock?.release()
         } catch (_: Throwable) {
