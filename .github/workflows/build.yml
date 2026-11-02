@@ -17,7 +17,7 @@ on:
 env:
   # TEMPORARY: the shared core (Omni-Daemon PR #17, daemon 8.27.0) isn't on Omni-Daemon main yet.
   # Switch this default back to 'main' once #17 merges, BEFORE tagging a release.
-  DAEMON_REF: ${{ github.event.inputs.daemon_ref || 'feat/node-shared-core' }}
+  DAEMON_REF: ${{ github.event.inputs.daemon_ref || 'main' }}
 
 permissions:
   contents: read
@@ -115,7 +115,8 @@ jobs:
         include:
           - { os: windows-latest, platform: windows, asset: omni-node-windows-x64.zip }
           - { os: ubuntu-latest, platform: linux, asset: omni-node-linux.tar.gz }
-          - { os: macos-latest, platform: macos, asset: omni-node-macos.tar.gz }
+          # macOS dropped for now (Nov 2 2026): its free runner sat queued 20+ min and would block an immutable release.
+          # - { os: macos-latest, platform: macos, asset: omni-node-macos.tar.gz }
     name: desktop · ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
     steps:
@@ -185,12 +186,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir dist
-          for f in app-debug.apk omni-node-windows-x64.zip omni-node-linux.tar.gz omni-node-macos.tar.gz; do
+          for f in app-debug.apk omni-node-windows-x64.zip omni-node-linux.tar.gz; do
             p="$(find artifacts -name "$f" -type f | head -n1)"
             [ -n "$p" ] || { echo "::error::missing $f: not publishing"; exit 1; }
             cp "$p" dist/
           done
-          for f in omni-node-windows-x64.zip omni-node-linux.tar.gz omni-node-macos.tar.gz; do
+          for f in omni-node-windows-x64.zip omni-node-linux.tar.gz; do
             v="$(python3 scripts/package_desktop.py version "dist/$f")"
             [ "$v" = "${{ needs.resolve.outputs.version }}" ] || { echo "::error::$f says Omni Node $v"; exit 1; }
           done
@@ -203,12 +204,11 @@ jobs:
             dist/app-debug.apk
             dist/omni-node-windows-x64.zip
             dist/omni-node-linux.tar.gz
-            dist/omni-node-macos.tar.gz
           body: |
             Pre-alpha test build of **Omni Node ${{ needs.resolve.outputs.version }}**: one app on every platform, built from one shared core (Omni-Daemon `${{ needs.resolve.outputs.daemon_sha }}`).
 
             - **Android**: `app-debug.apk` (debug signing key, arm64 + x86_64). A new debug key per build: uninstall the old Omni Node first.
             - **Windows**: `omni-node-windows-x64.zip`. Needs Python 3.12; double-click `Start Omni Node.cmd`.
-            - **Linux / macOS**: `omni-node-linux.tar.gz` / `omni-node-macos.tar.gz`. Needs Python 3.12 with Tk; run `./start-omni-node.sh`.
+            - **Linux**: `omni-node-linux.tar.gz`. (macOS: run from source for now.) Needs Python 3.12 with Tk; run `./start-omni-node.sh`.
 
             Same screen, words and version everywhere. Connect apps shows the node token (behind the screen lock on phones); paste it into KickBack / Mesh Monitor Hub settings (Remote hub, 127.0.0.1).
