@@ -84,7 +84,31 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: "8.10.2" }
       - run: scripts/fetch_daemon.sh "${{ needs.resolve.outputs.daemon_sha }}"
+      - name: Signing key (repo secrets; falls back to a per-build debug key when they're not set)
+        # Secrets: OMNI_SIGNING_KEYSTORE_B64 (base64 of a .jks), OMNI_SIGNING_STORE_PASSWORD,
+        # OMNI_SIGNING_KEY_ALIAS, optional OMNI_SIGNING_KEY_PASSWORD (defaults to the store password).
+        # Fork PRs get no secrets, so they build with the debug key, which is fine for testing.
+        env:
+          KS_B64: ${{ secrets.OMNI_SIGNING_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KS_B64:-}" ]; then
+            printf '%s' "$KS_B64" | base64 -d > "$RUNNER_TEMP/omni-node.jks"
+            echo "OMNI_SIGNING_KEYSTORE=$RUNNER_TEMP/omni-node.jks" >> "$GITHUB_ENV"
+            echo "Signing with the stable Omni Node key from repo secrets"
+          else
+            echo "::warning::OMNI_SIGNING_KEYSTORE_B64 is not set: this APK gets a per-build debug key, so it can't update an installed Omni Node in place."
+          fi
       - run: gradle :app:assembleDebug --stacktrace
+        env:
+          OMNI_SIGNING_STORE_PASSWORD: ${{ secrets.OMNI_SIGNING_STORE_PASSWORD }}
+          OMNI_SIGNING_KEY_ALIAS: ${{ secrets.OMNI_SIGNING_KEY_ALIAS }}
+          OMNI_SIGNING_KEY_PASSWORD: ${{ secrets.OMNI_SIGNING_KEY_PASSWORD }}
+      - name: Signing certificate (the same SHA-256 on every build = updates install in place)
+        run: |
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)"
+          "$BT/apksigner" verify --print-certs app/build/outputs/apk/debug/app-debug.apk | grep -E "DN|SHA-256" || true
+          rm -f "$RUNNER_TEMP/omni-node.jks"
       - name: APK size and contents (shared core + Node version packaged)
         run: |
           set -euo pipefail
@@ -207,7 +231,7 @@ jobs:
           body: |
             Pre-alpha test build of **Omni Node ${{ needs.resolve.outputs.version }}**: one app on every platform, built from one shared core (Omni-Daemon `${{ needs.resolve.outputs.daemon_sha }}`).
 
-            - **Android**: `app-debug.apk` (debug signing key, arm64 + x86_64). A new debug key per build: uninstall the old Omni Node first.
+            - **Android**: `app-debug.apk` (arm64 + x86_64). Signed with the stable Omni Node key since 0.5.1 (when the repo's signing secrets are set), so Updates > Get it in the app installs it over the old one. Coming from 0.5.0 or older (a per-build debug key), uninstall once first.
             - **Windows**: `omni-node-windows-x64.zip`. Needs Python 3.12; double-click `Start Omni Node.cmd`.
             - **Linux**: `omni-node-linux.tar.gz`. (macOS: run from source for now.) Needs Python 3.12 with Tk; run `./start-omni-node.sh`.
 
