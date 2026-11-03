@@ -1,3 +1,24 @@
 <resources>
     <string name="app_name">Omni Node</string>
+
+    <!-- In-app update (Android only). The check and its words ("Omni Node X is available", "You have
+         the newest Omni Node", "Couldn't check for updates") come from the shared core; these are only
+         the Android download + installer steps, which no other platform has. -->
+    <string name="update_action">Update</string>
+    <string name="update_offer_body">Download it now? Android shows its own Install screen next; your node key, peers and pairings stay.</string>
+    <string name="update_offer_body_size">Download it now (%1$s MB)? Android shows its own Install screen next; your node key, peers and pairings stay.</string>
+    <string name="update_downloading">Downloading Omni Node %1$s</string>
+    <string name="update_progress">%1$s of %2$s MB</string>
+    <string name="update_progress_unknown">%1$s MB</string>
+    <string name="update_download_failed">Download failed: %1$s</string>
+    <string name="update_bad_file">The downloaded file isn\'t an Omni Node update. Nothing was installed.</string>
+    <string name="update_not_newer">The download isn\'t newer than this Omni Node. Nothing was installed.</string>
+    <string name="update_allow_title">Allow Omni Node to install updates</string>
+    <string name="update_allow_body">Android asks once before an app may install its own updates. On the next screen, turn on \"Allow from this source\", then come back.</string>
+    <string name="update_allow_open">Open settings</string>
+    <string name="update_not_allowed">Updates aren\'t allowed yet. Turn on \"Allow from this source\" for Omni Node, then tap Get it again.</string>
+    <string name="update_install_failed">Couldn\'t open the installer: %1$s</string>
+    <string name="update_key_title">Uninstall needed one more time</string>
+    <string name="update_key_body">This Omni Node was built with an older signing key, so Android can\'t update it in place. Uninstall Omni Node, then install the new version from the release page. Uninstalling resets this phone\'s node key, peers and pairings. After that, updates install over the top.</string>
+    <string name="update_release_page">Release page</string>
 </resources>

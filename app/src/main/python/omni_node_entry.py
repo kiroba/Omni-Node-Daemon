@@ -9,6 +9,7 @@ functions, as JSON strings (simple to pass through Chaquopy):
     do_json(files_dir, action, args_json, env_json)    -> NodeCore.do()         (screen process)
     duties_json(files_dir, env_json, force_peers)      -> NodeCore.sync()       (:daemon process)
     words_json(files_dir)                              -> every Node word       (notification labels)
+    apk_update_json(files_dir, current, env_json)      -> newest release APK    (in-app update, Android only)
 
 The daemon reads its settings from the environment and its paths from HOME / cwd when it is
 imported, so everything is set before the import. Stopping = the service kills this process; the
@@ -152,3 +153,67 @@ def words_json(files_dir: str) -> str:
     _home(files_dir)
     import omni_node_words as W
     return json.dumps(W.all_words())
+
+
+# ---- in-app update (Android only: the desktop shells open the release page instead) --------------
+
+APK_RELEASES_URL = "https://api.github.com/repos/kiroba/Omni-Node-Daemon/releases?per_page=5"
+
+
+def pick_apk_release(releases, current: str) -> dict:
+    """Newest non-draft release (pre-releases count) that carries an .apk asset, compared with current.
+    A release without an APK (a desktop-only fix) is skipped, so the phone never offers what it can't install."""
+    import omni_node_core as C
+    best = None
+    for r in releases if isinstance(releases, list) else []:
+        if not isinstance(r, dict) or r.get("draft"):
+            continue
+        v = C.parse_version(str(r.get("tag_name") or ""))
+        apks = [a for a in (r.get("assets") or []) if isinstance(a, dict)
+                and str(a.get("name") or "").lower().endswith(".apk") and a.get("browser_download_url")]
+        if v and apks and (best is None or v > best[0]):
+            best = (v, r, apks[0])
+    if best is None:
+        return {"latest": "", "tag": "", "page_url": "", "apk_url": "", "apk_name": "", "size": 0, "newer": False}
+    v, r, a = best
+    cur = C.parse_version(current)
+    return {"latest": ".".join(map(str, v)), "tag": r.get("tag_name") or "", "page_url": r.get("html_url") or "",
+            "apk_url": a.get("browser_download_url") or "", "apk_name": a.get("name") or "",
+            "size": int(a.get("size") or 0), "newer": cur is None or v > cur}
+
+
+def _fetch_releases(timeout: float = 8.0):
+    import urllib.request
+    import omni_node_core as C
+    url = os.environ.get("OMNI_NODE_APK_UPDATE_URL", "").strip() or APK_RELEASES_URL
+    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
+                                               "User-Agent": f"OmniNode/{C.node_version()}"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read() or b"[]")
+
+
+def apk_update_json(files_dir: str, current: str = "", env_json: str = "{}") -> str:
+    """{ok, newer, latest, tag, page_url, apk_url, apk_name, size, line} or {ok: false, error, line}.
+    current = the installed versionName (BuildConfig). The answer is also saved as the core's update
+    state, so the Updates line and the "Get it" button on every screen agree with it. Never raises."""
+    try:
+        c = core(files_dir, env_json)
+        import time
+        import omni_node_core as C
+        import omni_node_words as W
+    except Exception as e:  # noqa: BLE001 - the screen shows the reason, never crashes
+        return json.dumps({"ok": False, "newer": False, "error": type(e).__name__, "line": type(e).__name__})
+    current = (current or C.node_version()).strip()
+    try:
+        info = pick_apk_release(_fetch_releases(), current)
+    except Exception as e:  # noqa: BLE001 - no network, GitHub down, rate limit, bad JSON
+        reason = str(getattr(e, "reason", None) or getattr(e, "code", None) or type(e).__name__)[:80]
+        return json.dumps({"ok": False, "newer": False, "error": reason, "line": W.update_failed(reason)})
+    info["ok"] = True
+    info["line"] = W.update_available(info["latest"]) if info["newer"] else W.update_newest(current)
+    try:
+        c.settings.set(update={"latest": info["latest"], "tag": info["tag"], "url": info["page_url"],
+                               "newer": info["newer"], "error": "", "checked": int(time.time())})
+    except Exception:  # noqa: BLE001 - only the shared banner; the answer above still stands
+        pass
+    return json.dumps(info)

@@ -16,6 +16,8 @@
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- In-app update: hands a downloaded Omni Node APK to Android's installer (the person still taps Install). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Radios (NodeRadio): BLE proximity + Wi-Fi Aware peers, shared by every Omni app via Node. -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
@@ -63,5 +65,16 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- In-app update: the installer reads the downloaded APK from cache/updates/ through this. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_paths" />
+        </provider>
     </application>
 </manifest>

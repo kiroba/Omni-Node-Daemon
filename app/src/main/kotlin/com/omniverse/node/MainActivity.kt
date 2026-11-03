@@ -27,12 +27,14 @@ import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.Executors
 
 /**
@@ -47,6 +49,7 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private val reads = Executors.newSingleThreadExecutor()     // ui_state refreshes
     private val acts = Executors.newSingleThreadExecutor()      // actions (pairing can take 45 s)
+    private val updates = Executors.newSingleThreadExecutor()   // update check + APK download
     private var state = JSONObject()
     private var words = JSONObject()
     private var built = false
@@ -79,6 +82,10 @@ class MainActivity : Activity() {
     private lateinit var pairedBox: LinearLayout
     private lateinit var updateLine: TextView
     private lateinit var updateGet: Button
+    private lateinit var updateBadge: TextView
+    private var updateBusy = false
+    @Volatile private var downloadCancelled = false
+    private var pendingApk: File? = null                        // waiting for "Allow from this source"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,6 +101,8 @@ class MainActivity : Activity() {
             addView(root)
         })
         load(refresh = false)
+        updates.execute { AppUpdate.clearCache(this) }          // an earlier download is installed or unwanted
+        quietUpdateCheck()
     }
 
     override fun onResume() {
@@ -109,6 +118,8 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         reads.shutdownNow()
         acts.shutdownNow()
+        downloadCancelled = true
+        updates.shutdownNow()
         super.onDestroy()
     }
 
@@ -243,12 +254,22 @@ class MainActivity : Activity() {
         root.addView(offerCard, full().apply { topMargin = pad / 3 })
         pairedBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(pairedBox, full())
-        // Updates
+        // Updates: the check, the words and the banner are the core's; download + install are Android's (AppUpdate).
         val upd = s.getJSONObject("update")
-        root.addView(section(upd.optString("title")))
+        val utitle = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        utitle.addView(section(upd.optString("title")).apply { layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT) })
+        updateBadge = TextView(this).apply {
+            text = "\u25CF"                                    // small dot: a newer Omni Node is out
+            textSize = 12f
+            setPadding(pad / 3, pad, 0, pad / 4)
+            visibility = View.GONE
+        }
+        utitle.addView(updateBadge)
+        root.addView(utitle, full())
         val urow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        urow.addView(button(upd.optString("button")) { act("check_updates") }, weight())
-        updateGet = button(upd.optString("get")) { openUrl(state.optJSONObject("update")?.optString("url").orEmpty()) }
+        urow.addView(button(upd.optString("button")) { checkForUpdate(installNow = false) }, weight())
+        updateGet = button(upd.optString("get")) { checkForUpdate(installNow = true) }
         urow.addView(updateGet, weight())
         root.addView(urow, full())
         updateLine = text("", 14f, c("text_2"))
@@ -335,6 +356,9 @@ class MainActivity : Activity() {
             updateLine.text = upd.optString("line")
             updateLine.setTextColor(color(upd.optString("color")))
             updateGet.visibility = if (upd.optString("url").isEmpty()) View.GONE else View.VISIBLE
+            updateBadge.visibility = if (upd.optBoolean("newer")) View.VISIBLE else View.GONE
+            updateBadge.setTextColor(color(upd.optString("color")))
+            if (updateBusy && !upd.optBoolean("newer")) updateLine.text = w("UPDATE_CHECKING")
         } finally {
             painting = false
         }
@@ -486,6 +510,143 @@ class MainActivity : Activity() {
             .show()
     }
 
+    // ---- Updates: check, download into the cache, Android's installer (never installs on its own) ----
+
+    /** On launch, at most once a day: only a toast + the badge when something newer is out; errors stay quiet. */
+    private fun quietUpdateCheck() {
+        if (!NodePrefs.updateCheckDue(this)) return
+        NodePrefs.setUpdateChecked(this)
+        updates.execute {
+            val r = AppUpdate.check(this)
+            ui.post {
+                if (r.optBoolean("ok") && r.optBoolean("newer")) toast(r.optString("line"))
+                if (r.optBoolean("ok")) load(refresh = false)
+            }
+        }
+    }
+
+    /** "Check for updates" (installNow = false) asks first; "Get it" (installNow = true) goes straight to the download. */
+    private fun checkForUpdate(installNow: Boolean) {
+        if (updateBusy) return
+        updateBusy = true
+        if (built) updateLine.text = w("UPDATE_CHECKING")
+        updates.execute {
+            val r = AppUpdate.check(this)
+            ui.post {
+                updateBusy = false
+                load(refresh = false)
+                if (isFinishing || isDestroyed) return@post
+                when {
+                    !r.optBoolean("ok") || !r.optBoolean("newer") -> toast(r.optString("line"))
+                    r.optString("apk_url").isEmpty() -> openUrl(r.optString("page_url"))
+                    installNow -> downloadUpdate(r)
+                    else -> offerUpdate(r)
+                }
+            }
+        }
+    }
+
+    private fun mb(bytes: Long) = String.format(java.util.Locale.US, "%.1f", bytes / 1_048_576.0)
+
+    private fun offerUpdate(r: JSONObject) {
+        val size = r.optLong("size")
+        AlertDialog.Builder(this)
+            .setTitle(r.optString("line"))
+            .setMessage(if (size > 0) getString(R.string.update_offer_body_size, mb(size)) else getString(R.string.update_offer_body))
+            .setNegativeButton(w("NOT_NOW"), null)
+            .setPositiveButton(getString(R.string.update_action)) { _, _ -> downloadUpdate(r) }
+            .show()
+    }
+
+    private fun downloadUpdate(r: JSONObject) {
+        if (updateBusy) return
+        updateBusy = true
+        downloadCancelled = false
+        val latest = r.optString("latest")
+        val p = (16 * resources.displayMetrics.density).toInt()
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { isIndeterminate = true; max = 1000 }
+        val label = TextView(this).apply { textSize = 13f; setPadding(0, p / 2, 0, 0) }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(p, p / 2, p, 0)
+            addView(bar, full())
+            addView(label, full())
+        }
+        val dlg = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.update_downloading, latest))
+            .setView(box)
+            .setCancelable(false)
+            .setNegativeButton(w("CANCEL")) { _, _ -> downloadCancelled = true }
+            .show()
+        fun close() { try { if (!isFinishing && !isDestroyed) dlg.dismiss() } catch (_: Exception) {} }
+        updates.execute {
+            try {
+                val apk = AppUpdate.download(this, r.optString("apk_url"), latest, r.optLong("size"), { downloadCancelled }) { done, total ->
+                    ui.post {
+                        if (total > 0) { bar.isIndeterminate = false; bar.progress = (done * 1000 / total).toInt() }
+                        label.text = if (total > 0) getString(R.string.update_progress, mb(done), mb(total)) else getString(R.string.update_progress_unknown, mb(done))
+                    }
+                }
+                val verdict = AppUpdate.verify(this, apk)
+                ui.post {
+                    updateBusy = false
+                    close()
+                    when (verdict) {
+                        AppUpdate.Verdict.OK -> install(apk)
+                        AppUpdate.Verdict.OTHER_KEY -> otherKeyDialog(r)
+                        AppUpdate.Verdict.NOT_NEWER -> { AppUpdate.clearCache(this); toast(getString(R.string.update_not_newer)) }
+                        AppUpdate.Verdict.NOT_OMNI_NODE -> { AppUpdate.clearCache(this); toast(getString(R.string.update_bad_file)) }
+                    }
+                }
+            } catch (t: Throwable) {
+                ui.post {
+                    updateBusy = false
+                    close()
+                    if (!downloadCancelled) toast(getString(R.string.update_download_failed, t.message ?: t.javaClass.simpleName))
+                }
+            }
+        }
+    }
+
+    /** Android 8+ asks once per app before it may install updates: explain, then open that switch. */
+    private fun install(apk: File) {
+        if (AppUpdate.canInstall(this)) { launchInstaller(apk); return }
+        pendingApk = apk
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.update_allow_title))
+            .setMessage(getString(R.string.update_allow_body))
+            .setNegativeButton(w("NOT_NOW")) { _, _ -> pendingApk = null }
+            .setPositiveButton(getString(R.string.update_allow_open)) { _, _ ->
+                try {
+                    startActivityForResult(AppUpdate.allowInstallsIntent(this), REQ_ALLOW_INSTALL)
+                } catch (e: Exception) {
+                    pendingApk = null
+                    toast(getString(R.string.update_install_failed, e.javaClass.simpleName))
+                }
+            }
+            .show()
+    }
+
+    private fun launchInstaller(apk: File) {
+        try {
+            startActivity(AppUpdate.installIntent(this, apk))
+        } catch (e: Exception) {
+            toast(getString(R.string.update_install_failed, e.message ?: e.javaClass.simpleName))
+        }
+    }
+
+    /** The phone has a build signed with another (older, per-build debug) key: Android can't update over it. */
+    private fun otherKeyDialog(r: JSONObject) {
+        AppUpdate.clearCache(this)
+        val b = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.update_key_title))
+            .setMessage(getString(R.string.update_key_body))
+            .setNegativeButton(w("CLOSE"), null)
+        val page = r.optString("page_url")
+        if (page.isNotEmpty()) b.setPositiveButton(getString(R.string.update_release_page)) { _, _ -> openUrl(page) }
+        b.show()
+    }
+
     // ---- Connect apps: the token, only after the phone's own lock (fingerprint, face, PIN) ----
 
     private fun connectApps() = act("token") { r -> if (r.optBoolean("ok")) unlockThenShow(r) }
@@ -542,6 +703,14 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_ALLOW_INSTALL) {
+            // Some phones report RESULT_CANCELED even after the switch was turned on: ask the system instead.
+            val apk = pendingApk
+            pendingApk = null
+            if (apk == null || !apk.exists()) return
+            if (AppUpdate.canInstall(this)) launchInstaller(apk) else toast(getString(R.string.update_not_allowed))
+            return
+        }
         if (requestCode == REQ_UNLOCK && resultCode == RESULT_OK) pendingToken?.let { showToken(it) }
         pendingToken = null
     }
@@ -620,5 +789,6 @@ class MainActivity : Activity() {
         private const val REQ_START = 1
         private const val REQ_UNLOCK = 7
         private const val REQ_RADIOS = 8
+        private const val REQ_ALLOW_INSTALL = 9
     }
 }

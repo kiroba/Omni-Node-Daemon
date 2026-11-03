@@ -60,6 +60,30 @@ r = json.loads(e.do_json(files, "pair_offer", "{}", env))
 assert r["ok"], r
 offer = json.loads(e.ui_state_json(files, env, False))["pairing"]["offer"]
 assert offer and offer["payload"].startswith("omni://pair?p="), offer
+# In-app update (Android): newest release WITH an .apk wins; a desktop-only newer release is skipped.
+rels = [
+    {"tag_name": "v9.9.9-prealpha", "draft": True, "assets": [{"name": "app-debug.apk", "browser_download_url": "x"}]},
+    {"tag_name": "v0.9.0-prealpha", "assets": [{"name": "omni-node-linux.tar.gz", "browser_download_url": "x"}]},
+    {"tag_name": "v0.8.1-prealpha", "html_url": "https://example/r", "assets": [
+        {"name": "app-debug.apk", "size": 123, "browser_download_url": "https://example/a.apk"}]},
+    {"tag_name": "v0.5.0-prealpha", "assets": [{"name": "app-debug.apk", "browser_download_url": "y"}]},
+]
+u = e.pick_apk_release(rels, version)
+assert u["latest"] == "0.8.1" and u["newer"] and u["apk_url"] == "https://example/a.apk" and u["size"] == 123, u
+assert not e.pick_apk_release(rels, "0.8.1")["newer"] and not e.pick_apk_release([], version)["newer"]
+rel_file = os.path.join(files, "releases.json")
+with open(rel_file, "w") as f:
+    json.dump(rels, f)
+os.environ["OMNI_NODE_APK_UPDATE_URL"] = "file://" + rel_file
+u = json.loads(e.apk_update_json(files, version, env))
+assert u["ok"] and u["newer"] and "0.8.1" in u["line"], u
+st = json.loads(e.ui_state_json(files, env, False))
+assert st["update"]["newer"] and st["update"]["line"] == u["line"] and st["update"]["url"] == "https://example/r", st["update"]
+os.environ["OMNI_NODE_APK_UPDATE_URL"] = "http://127.0.0.1:9/nothing"
+u = json.loads(e.apk_update_json(files, version, env))
+assert not u["ok"] and not u["newer"] and u["line"], u                  # plain message, no exception
+del os.environ["OMNI_NODE_APK_UPDATE_URL"]
+print("OK: in-app update picks the newest APK release;", u["line"])
 words = json.loads(e.words_json(files))
 assert words["NOTIF_TURN_OFF"] and os.path.exists(os.path.join(files, ".omni", "node_words.json"))
 print(f"OK: shared core through omni_node_entry on Python {sys.version.split()[0]} (Node {version})")

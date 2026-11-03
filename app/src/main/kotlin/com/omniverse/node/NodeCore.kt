@@ -35,6 +35,10 @@ object NodeCore {
     fun duties(c: Context, forcePeers: Boolean): JSONObject =
         JSONObject(entry(c).callAttr("duties_json", dir(c), NodeEnv.collect(c).toString(), forcePeers).toString())
 
+    /** The newest release with an APK vs. [installed] (versionName): see omni_node_entry.apk_update_json. */
+    fun apkUpdate(c: Context, installed: String): JSONObject =
+        JSONObject(entry(c).callAttr("apk_update_json", dir(c), installed, NodeEnv.collect(c).toString()).toString())
+
     /** Every Node word, from Python when it's up, else the copy the core cached last time. */
     fun words(c: Context, live: Boolean): JSONObject = try {
         if (live) JSONObject(entry(c).callAttr("words_json", dir(c)).toString())
