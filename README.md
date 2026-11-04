@@ -32,6 +32,12 @@ the daemon is ever merged into Omni-Hub.)
   behave as before. The daemon side is documented in Omni-Daemon `Admin/docs/QUIET_MESH.md`. No QR
   drawing on the phone yet (no QR library in the app); the desktop draws one when `qrcode` is installed.
 
+- **Game match results (0.5.2, needs daemon v8.28.0):** the embedded daemon takes finished matches
+  from Omni games (first: Plaza Brawler) on loopback `POST :5000/api/games/match` (Omni Node token
+  required, like every app call) and lists them on `GET /api/games/matches`. Results are signed
+  `game_match` events that sync to your other devices and stay out of the social feed. Apps can check
+  node-health `features` for `games_match`. Daemon side: Omni-Daemon `Admin/docs/GAMES_MATCH.md`.
+
 ## One app, every platform (0.5.0)
 Omni Node on Android and on the desktop (Windows, macOS, Linux) is **one app**: the screen state and
 every action come from one shared core in Omni-Daemon (`Admin/omni_node_core.py`, words in
