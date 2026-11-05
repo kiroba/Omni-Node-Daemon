@@ -18,7 +18,7 @@ env:
   # TEMPORARY: the shared core (Omni-Daemon PR #17, daemon 8.27.0) isn't on Omni-Daemon main yet.
   # Switch this default back to 'main' once #17 merges, BEFORE tagging a release.
   DAEMON_REF: ${{ github.event.inputs.daemon_ref || 'main' }}
-  MIN_DAEMON: "8.29.0"   # oldest Omni-Daemon a tagged release may package (0.5.3: LAN encounters)
+  MIN_DAEMON: "8.31.0"   # oldest Omni-Daemon a tagged release may package (0.5.4: People you met screen)
 
 permissions:
   contents: read
@@ -45,7 +45,7 @@ jobs:
           git clone --quiet --filter=blob:none --no-checkout https://github.com/kiroba/Omni-Daemon.git d
           SHA="$(git -C d rev-parse --verify --quiet "origin/$DAEMON_REF^{commit}" || git -C d rev-parse --verify "$DAEMON_REF^{commit}")"
           echo "Omni Node $VERSION, Omni-Daemon $DAEMON_REF = $SHA"
-          # Node 0.5.3 needs daemon >= 8.29.0 (LAN encounters). Releases (tags) refuse an older daemon.
+          # Node 0.5.4 needs daemon >= 8.31.0 (People you met in the shared core). Releases (tags) refuse an older daemon.
           DV="$(git -C d show "$SHA:Admin/omni_live_daemon_server.py" | sed -n 's/^VERSION = "\([0-9.]*\)"$/\1/p' | head -1)"
           echo "Omni-Daemon VERSION = $DV (needs >= $MIN_DAEMON for tags)"
           if [[ "$GITHUB_REF" == refs/tags/* ]] && [[ "$(printf '%s\n%s\n' "$MIN_DAEMON" "$DV" | sort -V | head -1)" != "$MIN_DAEMON" ]]; then
