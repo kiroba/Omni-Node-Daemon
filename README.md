@@ -38,6 +38,12 @@ the daemon is ever merged into Omni-Hub.)
   `game_match` events that sync to your other devices and stay out of the social feed. Apps can check
   node-health `features` for `games_match`. Daemon side: Omni-Daemon `Admin/docs/GAMES_MATCH.md`.
 
+- **LAN encounters (0.5.3, needs daemon v8.29.0):** opt-in, StreetPass-style. With encounters on,
+  nodes on the same network notice each other by a rotating beacon id, swap a signed card holding only
+  a display name on first meeting, and run a rate-limited catch-up sync afterwards. Manage them on
+  loopback `GET/DELETE :5000/api/encounters` and `/api/encounters/settings` (node-health `features`
+  lists `encounters`). Off by default; no in-app screen yet. Daemon side: Omni-Daemon `Admin/docs/ENCOUNTERS.md`.
+
 ## One app, every platform (0.5.0)
 Omni Node on Android and on the desktop (Windows, macOS, Linux) is **one app**: the screen state and
 every action come from one shared core in Omni-Daemon (`Admin/omni_node_core.py`, words in
