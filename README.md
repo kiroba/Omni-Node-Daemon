@@ -42,7 +42,8 @@ the daemon is ever merged into Omni-Hub.)
   nodes on the same network notice each other by a rotating beacon id, swap a signed card holding only
   a display name on first meeting, and run a rate-limited catch-up sync afterwards. Manage them on
   loopback `GET/DELETE :5000/api/encounters` and `/api/encounters/settings` (node-health `features`
-  lists `encounters`). Off by default; no in-app screen yet. Daemon side: Omni-Daemon `Admin/docs/ENCOUNTERS.md`.
+  lists `encounters`). Off by default. From 0.5.4 (daemon v8.31.0) the app has a People you met section: a switch, your display
+  name, the list of people you met, and Forget / Forget everyone. Daemon side: Omni-Daemon `Admin/docs/ENCOUNTERS.md`.
 
 ## One app, every platform (0.5.0)
 Omni Node on Android and on the desktop (Windows, macOS, Linux) is **one app**: the screen state and

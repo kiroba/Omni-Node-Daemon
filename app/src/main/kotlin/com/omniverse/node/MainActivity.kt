@@ -80,6 +80,13 @@ class MainActivity : Activity() {
     private lateinit var offerExpiry: TextView
     private lateinit var offerText: TextView
     private lateinit var pairedBox: LinearLayout
+    private lateinit var encTitle: TextView
+    private lateinit var encHint: TextView
+    private lateinit var encSwitch: Switch
+    private lateinit var encRow: LinearLayout
+    private lateinit var encLine: TextView
+    private lateinit var encBox: LinearLayout
+    private lateinit var encForgetAll: Button
     private lateinit var updateLine: TextView
     private lateinit var updateGet: Button
     private lateinit var updateBadge: TextView
@@ -254,6 +261,24 @@ class MainActivity : Activity() {
         root.addView(offerCard, full().apply { topMargin = pad / 3 })
         pairedBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(pairedBox, full())
+        // People you met (encounters, daemon v8.29.0+): the core decides every word; hidden on an older core.
+        encTitle = section(w("ENC_TITLE"))
+        root.addView(encTitle)
+        encHint = text(w("ENC_HINT"), 13f, c("text_3"))
+        root.addView(encHint, full())
+        encSwitch = switch(w("ENC_SWITCH")) { on -> toggleEncounters(on) }
+        root.addView(encSwitch, full())
+        encLine = text("", 14f, c("text_3")).apply { setPadding(0, pad / 4, 0, 0) }
+        root.addView(encLine, full())
+        encRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        encRow.addView(button(w("ENC_NAME")) { encounterNameDialog(null) }, weight())
+        encForgetAll = button(w("ENC_FORGET_ALL")) {
+            confirm(w("ENC_FORGET_ALL"), w("ENC_FORGET_ALL_CONFIRM"), w("ENC_FORGET")) { act("encounters_forget_all") }
+        }
+        encRow.addView(encForgetAll, weight())
+        root.addView(encRow, full().apply { topMargin = pad / 3 })
+        encBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(encBox, full())
         // Updates: the check, the words and the banner are the core's; download + install are Android's (AppUpdate).
         val upd = s.getJSONObject("update")
         val utitle = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -352,6 +377,7 @@ class MainActivity : Activity() {
             peersHint.text = peers.optString("hint")
             paintPeers(peers.optJSONArray("items") ?: JSONArray())
             paintPairing(s.getJSONObject("pairing"))
+            paintEncounters(s.optJSONObject("encounters"))
             val upd = s.getJSONObject("update")
             updateLine.text = upd.optString("line")
             updateLine.setTextColor(color(upd.optString("color")))
@@ -403,6 +429,55 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun paintEncounters(en: JSONObject?) {
+        val vis = if (en == null) View.GONE else View.VISIBLE
+        for (v in listOf(encTitle, encHint, encSwitch, encLine, encRow, encBox)) v.visibility = vis
+        if (en == null) return
+        encTitle.text = en.optString("title")
+        encHint.text = en.optString("hint")
+        encSwitch.text = en.optString("switch")
+        encSwitch.isChecked = en.optBoolean("on")
+        encSwitch.isEnabled = en.optBoolean("available")
+        encLine.text = en.optString("line")
+        encLine.setTextColor(color(en.optString("color")))
+        encRow.visibility = if (en.optBoolean("available")) View.VISIBLE else View.GONE
+        encForgetAll.visibility = if (en.optString("forget_all").isEmpty()) View.GONE else View.VISIBLE
+        encBox.removeAllViews()
+        if (!en.optBoolean("available")) return
+        val items = en.optJSONArray("items") ?: JSONArray()
+        if (items.length() == 0) {
+            encBox.addView(text(en.optString("none"), 15f, c("text_3")).apply { setPadding(0, 12, 0, 12) })
+        }
+        for (i in 0 until items.length()) {
+            val e = items.getJSONObject(i)
+            encBox.addView(text(e.optString("line"), 15f, color(e.optString("color"))).apply {
+                setPadding(0, 12, 0, 12)
+                setOnClickListener {
+                    confirm(w("ENC_FORGET"), e.optString("confirm"), w("ENC_FORGET")) {
+                        act("encounter_forget", JSONObject().put("id", e.optString("id")))
+                    }
+                }
+            })
+        }
+    }
+
+    /** Turning on with no saved name asks for one first (the core answers ask_name). */
+    private fun toggleEncounters(on: Boolean) {
+        act("encounters", JSONObject().put("on", on)) { r ->
+            if (on && r.optBoolean("ask_name")) encounterNameDialog(turnOn = true)
+        }
+    }
+
+    private fun encounterNameDialog(turnOn: Boolean?) {
+        val cur = state.optJSONObject("encounters")?.optString("name") ?: ""
+        inputDialog(w("ENC_NAME"), w("ENC_NAME_HOWTO"), w("ENC_NAME_EXAMPLE"), w("OK"),
+            type = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PERSON_NAME, initial = cur) { name ->
+            if (name.isBlank()) return@inputDialog
+            if (turnOn == true) act("encounters", JSONObject().put("on", true).put("name", name.trim()))
+            else act("encounter_name", JSONObject().put("name", name.trim()))
+        }
+    }
+
     // ---- actions: the core decides; this applies the Android effects ----
 
     private fun act(action: String, args: JSONObject = JSONObject(), after: ((JSONObject) -> Unit)? = null) {
@@ -448,11 +523,14 @@ class MainActivity : Activity() {
         try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } catch (_: Exception) {}
     }
 
-    private fun inputDialog(title: String, message: String, hint: String, ok: String, onOk: (String) -> Unit) {
+    private fun inputDialog(title: String, message: String, hint: String, ok: String,
+                            type: Int = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
+                            initial: String = "", onOk: (String) -> Unit) {
         val input = EditText(this).apply {
             this.hint = hint
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            inputType = type
             isSingleLine = true
+            setText(initial)
         }
         val p = (16 * resources.displayMetrics.density).toInt()
         val box = LinearLayout(this).apply { setPadding(p, p / 2, p, 0); addView(input, full()) }
