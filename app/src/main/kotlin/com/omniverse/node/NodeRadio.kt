@@ -51,7 +51,9 @@ import java.util.concurrent.Executors
  * - Wi-Fi Aware: publish + subscribe "omniverse", info {"h": key, "p": port}; on Android 10+ a
  *   PSK data path gives the peer's IPv6 address, which is handed to the daemon.
  * Every radio peer with an address is re-posted to loopback POST /api/sync/peers every 60 s (the daemon
- * forgets radio peers after 120 s), with the local token. Added peers (the Add peer list) are the
+ * forgets radio peers after 120 s), with the local token. The fresh BLE sightings go to the daemon too
+ * (POST /api/ble/nearby, daemon 8.32+): the daemon's BLE registry is what node-health "ble" reads, and
+ * a sighting stays a hint there as well - it never makes a peer. Added peers (the Add peer list) are the
  * shared core's job now (omni_node_core duties()), the same code as on desktop.
  * Status goes to files/radio_status.json for the screen (it runs in another process).
  */
@@ -131,6 +133,7 @@ class NodeRadio(private val context: Context) {
             if (!running) return
             io.execute {
                 for ((host, v) in addressed) post(host, v.first, v.second, v.third)
+                postBleNearby()
                 writeStatus()
             }
             main.postDelayed(this, REFRESH_MS)
@@ -156,6 +159,29 @@ class NodeRadio(private val context: Context) {
                 (c.errorStream?.bufferedReader()?.readText()?.take(120) ?: "")
         } catch (e: Exception) {
             "not handed in (${e.javaClass.simpleName})"
+        }
+    }
+
+    /** Hands the fresh BLE sightings to the daemon (POST /api/ble/nearby, daemon 8.32+), in the
+     *  registry's wire format: the key prefixes heard on service 0xFFA0, at most 64 per report.
+     *  Fire-and-forget - an older daemon answers 404 and the node screen keeps its own count. */
+    private fun postBleNearby() {
+        val now = System.currentTimeMillis()
+        val fresh = bleSeen.filterValues { now - it < BLE_FRESH_MS }.keys.sorted()
+        if (fresh.isEmpty()) return
+        val token = NodePrefs.localToken(context) ?: return
+        try {
+            val c = URL("http://127.0.0.1:5000/api/ble/nearby").openConnection() as HttpURLConnection
+            c.connectTimeout = 2000
+            c.readTimeout = 4000
+            c.requestMethod = "POST"
+            c.doOutput = true
+            c.setRequestProperty("Content-Type", "application/json")
+            c.setRequestProperty("X-Omni-Local-Token", token)
+            val body = JSONObject().put("seen", JSONArray(fresh.take(64)))
+            c.outputStream.use { it.write(body.toString().toByteArray()) }
+            c.responseCode
+        } catch (_: Exception) {
         }
     }
 
