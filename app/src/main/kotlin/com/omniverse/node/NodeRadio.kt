@@ -1,7 +1,15 @@
 package com.omniverse.node
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattServer
+import android.bluetooth.BluetoothGattServerCallback
+import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
@@ -37,6 +45,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.NetworkInterface
 import java.net.URL
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -47,11 +56,17 @@ import java.util.concurrent.Executors
  * OmniRadioDiscovery, same wire format so Node and older superapp builds still see each other).
  *
  * - BLE: advertises UUID 0xFFA0 with the first 16 bytes of the node key, scans for the same.
- *   Proximity only (BLE gives no IP), shown as "nearby" in the status.
+ *   The advertisement is connectable (daemon 8.33+): a GATT service (0xFFA1 / 0xFFA2) serves this
+ *   node's signed introduction - minted by the daemon (GET /api/ble/introduction), because the
+ *   node key never leaves it - and a newly seen peer is connected to once to read its blob,
+ *   which is handed to the daemon (POST /api/ble/met) for verification. BLE still gives no IP;
+ *   the blob's endpoints are where to dial when an IP path exists.
  * - Wi-Fi Aware: publish + subscribe "omniverse", info {"h": key, "p": port}; on Android 10+ a
  *   PSK data path gives the peer's IPv6 address, which is handed to the daemon.
  * Every radio peer with an address is re-posted to loopback POST /api/sync/peers every 60 s (the daemon
- * forgets radio peers after 120 s), with the local token. Added peers (the Add peer list) are the
+ * forgets radio peers after 120 s), with the local token. The fresh BLE sightings go to the daemon too
+ * (POST /api/ble/nearby, daemon 8.32+): the daemon's BLE registry is what node-health "ble" reads, and
+ * a sighting stays a hint there as well - it never makes a peer. Added peers (the Add peer list) are the
  * shared core's job now (omni_node_core duties()), the same code as on desktop.
  * Status goes to files/radio_status.json for the screen (it runs in another process).
  */
@@ -60,10 +75,14 @@ class NodeRadio(private val context: Context) {
 
     companion object {
         private val SERVICE_UUID = ParcelUuid(UUID.fromString("0000FFA0-0000-1000-8000-00805F9B34FB"))
+        private val INTRO_SERVICE_UUID = UUID.fromString("0000FFA1-0000-1000-8000-00805F9B34FB")
+        private val INTRO_CHAR_UUID = UUID.fromString("0000FFA2-0000-1000-8000-00805F9B34FB")
         private const val AWARE_SERVICE = "omniverse"
         private const val AWARE_PSK = "omniverse-mesh-dev"
         private const val REFRESH_MS = 60_000L
         private const val BLE_FRESH_MS = 90_000L
+        private const val INTRO_RETRY_MS = 300_000L
+        private const val GATT_TIMEOUT_MS = 12_000L
 
         fun statusFile(c: Context) = File(c.filesDir, "radio_status.json")
 
@@ -93,6 +112,12 @@ class NodeRadio(private val context: Context) {
     private var bleAdvertising = false
     private var bleScanning = false
     private val bleSeen = ConcurrentHashMap<String, Long>()       // key prefix -> last seen ms
+
+    private var gattServer: BluetoothGattServer? = null
+    @Volatile private var introBlob: ByteArray? = null            // our signed introduction, served over GATT
+    private val introTried = ConcurrentHashMap<String, Long>()    // key prefix -> last GATT attempt ms
+    @Volatile private var activeGatt: BluetoothGatt? = null       // one client exchange at a time
+    @Volatile private var metPosted = 0                           // introductions the daemon accepted
 
     private var awareSession: WifiAwareSession? = null
     private var publishSession: PublishDiscoverySession? = null
@@ -131,6 +156,8 @@ class NodeRadio(private val context: Context) {
             if (!running) return
             io.execute {
                 for ((host, v) in addressed) post(host, v.first, v.second, v.third)
+                postBleNearby()
+                refreshIntroBlob()
                 writeStatus()
             }
             main.postDelayed(this, REFRESH_MS)
@@ -159,6 +186,29 @@ class NodeRadio(private val context: Context) {
         }
     }
 
+    /** Hands the fresh BLE sightings to the daemon (POST /api/ble/nearby, daemon 8.32+), in the
+     *  registry's wire format: the key prefixes heard on service 0xFFA0, at most 64 per report.
+     *  Fire-and-forget - an older daemon answers 404 and the node screen keeps its own count. */
+    private fun postBleNearby() {
+        val now = System.currentTimeMillis()
+        val fresh = bleSeen.filterValues { now - it < BLE_FRESH_MS }.keys.sorted()
+        if (fresh.isEmpty()) return
+        val token = NodePrefs.localToken(context) ?: return
+        try {
+            val c = URL("http://127.0.0.1:5000/api/ble/nearby").openConnection() as HttpURLConnection
+            c.connectTimeout = 2000
+            c.readTimeout = 4000
+            c.requestMethod = "POST"
+            c.doOutput = true
+            c.setRequestProperty("Content-Type", "application/json")
+            c.setRequestProperty("X-Omni-Local-Token", token)
+            val body = JSONObject().put("seen", JSONArray(fresh.take(64)))
+            c.outputStream.use { it.write(body.toString().toByteArray()) }
+            c.responseCode
+        } catch (_: Exception) {
+        }
+    }
+
     private fun addAddressed(host: String, p: Int, transport: String, key: String) {
         val isNew = addressed.put(host, Triple(p, transport, key)) == null
         if (isNew) io.execute { post(host, p, transport, key); writeStatus() }
@@ -179,6 +229,7 @@ class NodeRadio(private val context: Context) {
                     else -> errors.lastOrNull { it.startsWith("ble") }?.removePrefix("ble: ") ?: "off"
                 })
                 .put("ble_nearby", nearby)
+                .put("ble_met", metPosted)
                 .put("wifi_aware", awareState)
                 .put("missing_permissions", JSONArray(missing().toList()))
                 .put("peers", JSONArray().apply {
@@ -236,6 +287,7 @@ class NodeRadio(private val context: Context) {
         val hex = data.joinToString("") { "%02x".format(it.toInt() and 0xff) }
         if (nodeKey.startsWith(hex)) return
         bleSeen[hex] = System.currentTimeMillis()
+        maybeIntro(r.device, hex)
     }
 
     private fun startBle() {
@@ -252,7 +304,7 @@ class NodeRadio(private val context: Context) {
             AdvertiseSettings.Builder()
                 .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
                 .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-                .setConnectable(false).build(),
+                .setConnectable(true).build(),
             AdvertiseData.Builder().setIncludeDeviceName(false).setIncludeTxPowerLevel(false)
                 .addServiceUuid(SERVICE_UUID).addServiceData(SERVICE_UUID, keyPrefix()).build(),
             advertiseCallback
@@ -263,12 +315,179 @@ class NodeRadio(private val context: Context) {
                 ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_POWER).build(), scanCallback)
             bleScanning = true
         }
+        safe("ble gatt") { startGattServer() }
     }
 
     private fun stopBle() {
         try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: Throwable) {}
         try { scanner?.stopScan(scanCallback) } catch (_: Throwable) {}
+        closeActiveGatt()
+        try { gattServer?.close() } catch (_: Throwable) {}
+        gattServer = null
         advertiser = null; scanner = null; bleAdvertising = false; bleScanning = false
+    }
+
+    // ---- BLE introductions (GATT): serve our signed blob, read the peer's ----
+
+    private fun hasConnectPermission(): Boolean =
+        Build.VERSION.SDK_INT < 31 ||
+            context.checkSelfPermission("android.permission.BLUETOOTH_CONNECT") == PackageManager.PERMISSION_GRANTED
+
+    private val gattServerCallback = object : BluetoothGattServerCallback() {
+        override fun onCharacteristicReadRequest(device: BluetoothDevice, requestId: Int, offset: Int,
+                                                 characteristic: BluetoothGattCharacteristic) {
+            val blob = introBlob
+            if (blob == null || characteristic.uuid != INTRO_CHAR_UUID) {
+                try { gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null) } catch (_: Throwable) {}
+                return
+            }
+            val slice = if (offset >= blob.size) ByteArray(0) else blob.copyOfRange(offset, blob.size)
+            try { gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, slice) } catch (_: Throwable) {}
+        }
+    }
+
+    private fun startGattServer() {
+        if (!hasConnectPermission()) { err("ble: introductions need the Nearby devices (connect) permission"); return }
+        val mgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager ?: return
+        val server = mgr.openGattServer(context, gattServerCallback) ?: return
+        val ch = BluetoothGattCharacteristic(INTRO_CHAR_UUID,
+            BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ)
+        val svc = BluetoothGattService(INTRO_SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+        svc.addCharacteristic(ch)
+        server.addService(svc)
+        gattServer = server
+    }
+
+    /** Fetches this node's signed introduction from the daemon (GET /api/ble/introduction) and
+     *  rebuilds the blob the GATT server hands out: short keys, our current LAN endpoints merged
+     *  in (unsigned dial hints - the daemon signs the identity, not the endpoints). An older
+     *  daemon answers 404; then there is simply nothing to serve. */
+    private fun refreshIntroBlob() {
+        val token = NodePrefs.localToken(context) ?: return
+        try {
+            val c = URL("http://127.0.0.1:5000/api/ble/introduction").openConnection() as HttpURLConnection
+            c.connectTimeout = 2000
+            c.readTimeout = 4000
+            c.setRequestProperty("X-Omni-Local-Token", token)
+            if (c.responseCode != 200) return
+            val o = JSONObject(c.inputStream.bufferedReader().readText())
+            introBlob = JSONObject()
+                .put("h", o.getString("node_id"))
+                .put("m", o.optString("mesh_id", ""))
+                .put("n", o.optString("name", ""))
+                .put("t", o.getLong("ts"))
+                .put("s", o.getString("sig"))
+                .put("e", localEndpoints())
+                .toString().toByteArray()
+        } catch (_: Exception) {
+        }
+    }
+
+    /** This phone's current private IPv4 addresses with the P2P port: where a node that just
+     *  met us over BLE can dial us once an IP path exists (same LAN, hotspot, venue network). */
+    private fun localEndpoints(): JSONArray {
+        val out = JSONArray()
+        try {
+            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return out
+            for (iface in ifaces.toList()) {
+                if (!iface.isUp || iface.isLoopback) continue
+                for (addr in iface.inetAddresses.toList()) {
+                    val h = addr.hostAddress ?: continue
+                    if (addr.isLoopbackAddress || !addr.isSiteLocalAddress || h.contains(":")) continue
+                    out.put(JSONObject().put("h", h).put("p", port))
+                    if (out.length() >= 3) return out
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return out
+    }
+
+    /** One GATT exchange per newly seen peer (retried at most every INTRO_RETRY_MS): connect,
+     *  read the introduction blob, hand it to the daemon. Serialized - one exchange at a time,
+     *  with a watchdog so a stuck connection never blocks the next peer for long. */
+    private fun maybeIntro(device: BluetoothDevice?, prefix: String) {
+        if (device == null || !running || activeGatt != null || !hasConnectPermission()) return
+        val now = System.currentTimeMillis()
+        val last = introTried[prefix]
+        if (last != null && now - last < INTRO_RETRY_MS) return
+        introTried[prefix] = now
+        try {
+            val gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE) ?: return
+            activeGatt = gatt
+            main.postDelayed({ if (activeGatt === gatt) closeActiveGatt() }, GATT_TIMEOUT_MS)
+        } catch (t: Throwable) {
+            err("ble gatt: ${t.message}")
+        }
+    }
+
+    private fun closeActiveGatt() {
+        val g = activeGatt ?: return
+        activeGatt = null
+        try { g.disconnect() } catch (_: Throwable) {}
+        try { g.close() } catch (_: Throwable) {}
+    }
+
+    private val gattCallback = object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (gatt !== activeGatt) { try { gatt.close() } catch (_: Throwable) {}; return }
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> if (!gatt.requestMtu(256)) gatt.discoverServices()
+                BluetoothProfile.STATE_DISCONNECTED -> closeActiveGatt()
+            }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (gatt === activeGatt) gatt.discoverServices()
+        }
+
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (gatt !== activeGatt) return
+            val ch = gatt.getService(INTRO_SERVICE_UUID)?.getCharacteristic(INTRO_CHAR_UUID)
+            if (ch == null || !gatt.readCharacteristic(ch)) gatt.disconnect()
+        }
+
+        @Deprecated("Legacy callback - the value arrives via the characteristic pre-API 33")
+        override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (gatt !== activeGatt) return
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                val v = characteristic.value
+                if (v != null) io.execute { handInIntro(v) }
+            }
+            gatt.disconnect()
+        }
+    }
+
+    /** Hands a peer's introduction blob (read over GATT) to the daemon's POST /api/ble/met.
+     *  Nothing here trusts the blob - the daemon verifies the signature and keeps the meeting. */
+    private fun handInIntro(raw: ByteArray) {
+        val token = NodePrefs.localToken(context) ?: return
+        try {
+            val b = JSONObject(String(raw))
+            val eps = JSONArray()
+            val src = b.optJSONArray("e") ?: JSONArray()
+            for (i in 0 until src.length()) {
+                val e = src.optJSONObject(i) ?: continue
+                eps.put(JSONObject().put("host", e.optString("h")).put("port", e.optInt("p", port)))
+            }
+            val body = JSONObject()
+                .put("node_id", b.getString("h"))
+                .put("mesh_id", b.optString("m", ""))
+                .put("name", b.optString("n", ""))
+                .put("endpoints", eps)
+                .put("ts", b.getLong("t"))
+                .put("sig", b.getString("s"))
+            val c = URL("http://127.0.0.1:5000/api/ble/met").openConnection() as HttpURLConnection
+            c.connectTimeout = 2000
+            c.readTimeout = 4000
+            c.requestMethod = "POST"
+            c.doOutput = true
+            c.setRequestProperty("Content-Type", "application/json")
+            c.setRequestProperty("X-Omni-Local-Token", token)
+            c.outputStream.use { it.write(body.toString().toByteArray()) }
+            if (c.responseCode == 200) { metPosted++; writeStatus() }
+        } catch (_: Exception) {
+        }
     }
 
     // ---- Wi-Fi Aware ----
