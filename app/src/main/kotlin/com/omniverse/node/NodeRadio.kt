@@ -60,7 +60,9 @@ import java.util.concurrent.Executors
  *   node's signed introduction - minted by the daemon (GET /api/ble/introduction), because the
  *   node key never leaves it - and a newly seen peer is connected to once to read its blob,
  *   which is handed to the daemon (POST /api/ble/met) for verification. BLE still gives no IP;
- *   the blob's endpoints are where to dial when an IP path exists.
+ *   the blob's endpoints are where to dial when an IP path exists. Every stage of that exchange
+ *   counts its outcome into the status file (ble_intro), so a failed introduction shows where
+ *   it stopped instead of vanishing.
  * - Wi-Fi Aware: publish + subscribe "omniverse", info {"h": key, "p": port}; on Android 10+ a
  *   PSK data path gives the peer's IPv6 address, which is handed to the daemon.
  * Every radio peer with an address is re-posted to loopback POST /api/sync/peers every 60 s (the daemon
@@ -118,6 +120,32 @@ class NodeRadio(private val context: Context) {
     private val introTried = ConcurrentHashMap<String, Long>()    // key prefix -> last GATT attempt ms
     @Volatile private var activeGatt: BluetoothGatt? = null       // one client exchange at a time
     @Volatile private var metPosted = 0                           // introductions the daemon accepted
+
+    // Introduction-path observability (radio_status.json "ble_intro"): every stage of the GATT
+    // exchange counts its outcomes and remembers the most recent one, so a failed introduction
+    // is visible on the node screen instead of vanishing - the hand-in used to swallow every
+    // failure, which is how the first field test (Nov 12) failed without leaving a trace.
+    @Volatile private var introAttempts = 0
+    @Volatile private var introConnected = 0
+    @Volatile private var introReadOk = 0
+    @Volatile private var introServed = 0
+    @Volatile private var introServedEmpty = 0
+    @Volatile private var introLast: JSONObject? = null
+
+    /** Stamps the most recent introduction outcome (stage + short detail) for the status file. */
+    private fun introNote(stage: String, detail: String) {
+        introLast = JSONObject()
+            .put("stage", stage)
+            .put("detail", detail.take(120))
+            .put("at_ms", System.currentTimeMillis())
+    }
+
+    /** introNote for conditions that repeat every tick (blob fetch, closed gates): record on change only. */
+    private fun introNoteOnce(stage: String, detail: String) {
+        val last = introLast
+        if (last != null && last.optString("stage") == stage && last.optString("detail") == detail) return
+        introNote(stage, detail)
+    }
 
     private var awareSession: WifiAwareSession? = null
     private var publishSession: PublishDiscoverySession? = null
@@ -230,6 +258,14 @@ class NodeRadio(private val context: Context) {
                 })
                 .put("ble_nearby", nearby)
                 .put("ble_met", metPosted)
+                .put("ble_intro", JSONObject()
+                    .put("attempts", introAttempts)
+                    .put("connected", introConnected)
+                    .put("read_ok", introReadOk)
+                    .put("posted", metPosted)
+                    .put("served", introServed)
+                    .put("served_empty", introServedEmpty)
+                    .put("last", introLast ?: JSONObject.NULL))
                 .put("wifi_aware", awareState)
                 .put("missing_permissions", JSONArray(missing().toList()))
                 .put("peers", JSONArray().apply {
@@ -338,9 +374,14 @@ class NodeRadio(private val context: Context) {
                                                  characteristic: BluetoothGattCharacteristic) {
             val blob = introBlob
             if (blob == null || characteristic.uuid != INTRO_CHAR_UUID) {
+                if (blob == null) {
+                    introServedEmpty++
+                    introNoteOnce("served_empty", "a peer read our introduction before the first blob fetch succeeded")
+                }
                 try { gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null) } catch (_: Throwable) {}
                 return
             }
+            if (offset == 0) introServed++
             val slice = if (offset >= blob.size) ByteArray(0) else blob.copyOfRange(offset, blob.size)
             try { gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, slice) } catch (_: Throwable) {}
         }
@@ -348,8 +389,10 @@ class NodeRadio(private val context: Context) {
 
     private fun startGattServer() {
         if (!hasConnectPermission()) { err("ble: introductions need the Nearby devices (connect) permission"); return }
-        val mgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager ?: return
-        val server = mgr.openGattServer(context, gattServerCallback) ?: return
+        val mgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        if (mgr == null) { introNoteOnce("gatt_server_unavailable", "no BluetoothManager"); return }
+        val server = mgr.openGattServer(context, gattServerCallback)
+        if (server == null) { introNoteOnce("gatt_server_unavailable", "openGattServer returned null"); return }
         val ch = BluetoothGattCharacteristic(INTRO_CHAR_UUID,
             BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ)
         val svc = BluetoothGattService(INTRO_SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
@@ -369,7 +412,8 @@ class NodeRadio(private val context: Context) {
             c.connectTimeout = 2000
             c.readTimeout = 4000
             c.setRequestProperty("X-Omni-Local-Token", token)
-            if (c.responseCode != 200) return
+            val fetchCode = c.responseCode
+            if (fetchCode != 200) { introNoteOnce("blob_fetch_http_$fetchCode", "GET /api/ble/introduction"); return }
             val o = JSONObject(c.inputStream.bufferedReader().readText())
             introBlob = JSONObject()
                 .put("h", o.getString("node_id"))
@@ -379,7 +423,8 @@ class NodeRadio(private val context: Context) {
                 .put("s", o.getString("sig"))
                 .put("e", localEndpoints())
                 .toString().toByteArray()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            introNoteOnce("blob_fetch_exception", e.javaClass.simpleName)
         }
     }
 
@@ -407,16 +452,23 @@ class NodeRadio(private val context: Context) {
      *  read the introduction blob, hand it to the daemon. Serialized - one exchange at a time,
      *  with a watchdog so a stuck connection never blocks the next peer for long. */
     private fun maybeIntro(device: BluetoothDevice?, prefix: String) {
-        if (device == null || !running || activeGatt != null || !hasConnectPermission()) return
+        if (device == null || !running || activeGatt != null) return
+        if (!hasConnectPermission()) {
+            introNoteOnce("no_connect_permission", "BLUETOOTH_CONNECT not granted; introductions cannot start")
+            return
+        }
         val now = System.currentTimeMillis()
         val last = introTried[prefix]
         if (last != null && now - last < INTRO_RETRY_MS) return
         introTried[prefix] = now
+        introAttempts++
         try {
-            val gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE) ?: return
+            val gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            if (gatt == null) { introNote("connect_failed", "connectGatt returned null"); return }
             activeGatt = gatt
             main.postDelayed({ if (activeGatt === gatt) closeActiveGatt() }, GATT_TIMEOUT_MS)
         } catch (t: Throwable) {
+            introNote("connect_failed", "connectGatt threw ${t.javaClass.simpleName}")
             err("ble gatt: ${t.message}")
         }
     }
@@ -431,8 +483,15 @@ class NodeRadio(private val context: Context) {
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (gatt !== activeGatt) { try { gatt.close() } catch (_: Throwable) {}; return }
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                introNote("connect_failed", "gatt status $status")
+                err("ble intro: connect failed (gatt status $status)")
+            }
             when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> if (!gatt.requestMtu(256)) gatt.discoverServices()
+                BluetoothProfile.STATE_CONNECTED -> {
+                    introConnected++
+                    if (!gatt.requestMtu(256)) gatt.discoverServices()
+                }
                 BluetoothProfile.STATE_DISCONNECTED -> closeActiveGatt()
             }
         }
@@ -444,7 +503,14 @@ class NodeRadio(private val context: Context) {
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (gatt !== activeGatt) return
             val ch = gatt.getService(INTRO_SERVICE_UUID)?.getCharacteristic(INTRO_CHAR_UUID)
-            if (ch == null || !gatt.readCharacteristic(ch)) gatt.disconnect()
+            if (ch == null) {
+                introNote("service_missing", "discovery status $status")
+                err("ble intro: peer has no introduction service (discovery status $status)")
+                gatt.disconnect()
+            } else if (!gatt.readCharacteristic(ch)) {
+                introNote("read_failed", "read could not start")
+                gatt.disconnect()
+            }
         }
 
         @Deprecated("Legacy callback - the value arrives via the characteristic pre-API 33")
@@ -452,7 +518,15 @@ class NodeRadio(private val context: Context) {
             if (gatt !== activeGatt) return
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 val v = characteristic.value
-                if (v != null) io.execute { handInIntro(v) }
+                if (v != null) {
+                    introReadOk++
+                    introNote("read_ok", "${v.size} bytes")
+                    io.execute { handInIntro(v) }
+                } else {
+                    introNote("blob_empty", "read succeeded but returned no value")
+                }
+            } else {
+                introNote("read_failed", "gatt status $status")
             }
             gatt.disconnect()
         }
@@ -485,8 +559,19 @@ class NodeRadio(private val context: Context) {
             c.setRequestProperty("Content-Type", "application/json")
             c.setRequestProperty("X-Omni-Local-Token", token)
             c.outputStream.use { it.write(body.toString().toByteArray()) }
-            if (c.responseCode == 200) { metPosted++; writeStatus() }
-        } catch (_: Exception) {
+            val code = c.responseCode
+            if (code == 200) {
+                metPosted++
+                introNote("posted", "daemon accepted the introduction")
+                writeStatus()
+            } else {
+                val why = try { c.errorStream?.bufferedReader()?.readText()?.take(120) ?: "" } catch (_: Exception) { "" }
+                introNote("met_http_$code", why)
+                err("ble intro: daemon answered $code: $why")
+            }
+        } catch (e: Exception) {
+            introNote("met_exception", e.javaClass.simpleName)
+            err("ble intro: hand-in failed (${e.javaClass.simpleName})")
         }
     }
 
