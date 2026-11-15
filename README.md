@@ -1,8 +1,8 @@
 # Omni-Node-Daemon
 
 The Omniverse node daemon as its own Android app: a one-tap **Network** switch that keeps you
-connected to people nearby, even when your other Omni apps are closed. Think Tailscale, but for the
-Omniverse mesh. (Directive v7, step 1: this ships and passes field tests on real phones *before*
+connected to people nearby, even when your other Omni apps are closed. Your own mesh: no accounts,
+no outside service, no one who can switch it off. (Directive v7, step 1: this ships and passes field tests on real phones *before*
 the daemon is ever merged into Omni-Hub.)
 
 ## What it does
