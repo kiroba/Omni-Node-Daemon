@@ -5,6 +5,12 @@ connected to people nearby, even when your other Omni apps are closed. Your own 
 no outside service, no one who can switch it off. (Directive v7, step 1: this ships and passes field tests on real phones *before*
 the daemon is ever merged into Omni-Hub.)
 
+**Current: Omni Node 0.5.7** (`VERSION` is the one version source), shipping daemon **8.33.2**.
+Released as `v0.5.7-prealpha` on Nov 16, 2026 (Android APK + Windows + Linux archives from the
+same release). Field proof so far: on Nov 14, 2026 the desktop node synced with a phone on the
+same LAN and over the internet rendezvous — 128 reconciles, 0 errors, stores converged (flow
+proven phone → desktop; phone inbound still 0 events).
+
 ## What it does
 - **ON**: starts a foreground service (`START_STICKY`, type *connected device*) in its own process,
   running the embedded [Omni-Daemon](https://github.com/kiroba/Omni-Daemon) with zero setup:
@@ -81,8 +87,11 @@ Actions > build > Run workflow, optionally with a daemon tag.
 
 ## Not yet
 - Field tests of Relay calls: charging/Wi-Fi gating, router port mapping, and calls between
-  different networks.
+  different networks. (OmniCast's first real two-phone, different-networks trial is the friend
+  test on Nov 18/19, 2026.)
 - Automatic token handoff to other Omni apps (needs one signing key across the apps). For now, **Connect apps** shows the token behind the screen lock to paste into each app.
-- Real-phone field test (the gate before any Omni-Hub merge), including pairing two phones on one Wi-Fi.
+- The two-phone field test (the gate before any Omni-Hub merge): two phones introducing over
+  BLE and pairing on one Wi-Fi is still unproven — desktop ↔ phone sync is proven (Nov 14,
+  2026), phone ↔ phone is not yet.
 - Scanning a pairing QR code with the camera (paste the pairing text for now).
 - Release signing / developer registration (limited-distribution account).
